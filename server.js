@@ -49,6 +49,9 @@ app.post('/api/analyze', upload.single('image'), async (req, res) => {
       });
     }
 
+    // Log para verificar ejecución real de AI
+    console.log("✅ Prompt sent to OpenAI from /api/analyze");
+
     // Convertir buffer a base64
     const base64Image = req.file.buffer.toString('base64');
     const dataUrl = `data:${req.file.mimetype};base64,${base64Image}`;

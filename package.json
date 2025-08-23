@@ -1,7 +1,7 @@
 {
   "name": "backend",
   "version": "1.0.0",
-  "description": "Backend API for gym equipment analysis",
+  "description": "Backend API for gym equipment analysis with Lemon Squeezy integration",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -12,7 +12,9 @@
     "gym",
     "equipment",
     "analysis",
-    "api"
+    "api",
+    "lemonsqueezy",
+    "subscriptions"
   ],
   "author": "",
   "license": "ISC",

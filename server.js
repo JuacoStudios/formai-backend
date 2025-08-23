@@ -4,13 +4,19 @@ const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
 const { OpenAI } = require('openai');
+const { 
+  getProducts, 
+  createCheckout, 
+  verifyWebhookSignature, 
+  processWebhookEvent,
+  validateConfig 
+} = require('./lemonsqueezy');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
 
 // Middleware
 app.use(cors());
-app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Configure multer for handling file uploads
@@ -37,6 +43,89 @@ const openai = new OpenAI({
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
+});
+
+// New Lemon Squeezy health endpoint
+app.get('/api/health', (req, res) => {
+  res.json({ 
+    ok: true, 
+    ts: Date.now() 
+  });
+});
+
+// Lemon Squeezy products endpoint
+app.get('/api/products', async (req, res) => {
+  try {
+    const products = await getProducts();
+    res.json({ 
+      success: true, 
+      data: products 
+    });
+  } catch (error) {
+    console.error('Error fetching products:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message || 'Failed to fetch products' 
+    });
+  }
+});
+
+// Lemon Squeezy create checkout endpoint
+app.post('/api/create-checkout', async (req, res) => {
+  try {
+    const { variantId, customerEmail, redirectUrl } = req.body;
+    
+    if (!variantId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'variantId is required' 
+      });
+    }
+
+    const checkoutUrl = await createCheckout(variantId, customerEmail, redirectUrl);
+    
+    res.json({ 
+      success: true, 
+      checkoutUrl 
+    });
+  } catch (error) {
+    console.error('Error creating checkout:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to create checkout' 
+    });
+  }
+});
+
+// Lemon Squeezy webhook endpoint (must use raw body)
+app.post('/webhooks/lemonsqueezy', express.raw({ type: '*/*' }), async (req, res) => {
+  try {
+    const signature = req.headers['x-signature'];
+    
+    if (!signature) {
+      console.error('Missing X-Signature header');
+      return res.status(400).send('Missing signature');
+    }
+
+    // Verify webhook signature
+    if (!verifyWebhookSignature(req.body, signature)) {
+      console.error('Invalid webhook signature');
+      return res.status(400).send('Invalid signature');
+    }
+
+    // Parse the raw body
+    const payload = JSON.parse(req.body.toString('utf8'));
+    
+    // Process the webhook event
+    processWebhookEvent(payload);
+    
+    // Always return 200 to avoid retries
+    res.status(200).send('ok');
+  } catch (error) {
+    console.error('Error processing webhook:', error);
+    // Still return 200 to avoid retries, but log the error
+    res.status(200).send('ok');
+  }
 });
 
 // Analyze equipment endpoint
@@ -96,6 +185,33 @@ app.post('/api/analyze', upload.single('image'), async (req, res) => {
   }
 });
 
+// RevenueCat Offerings endpoint
+app.get('/api/revenuecat/offerings', async (req, res) => {
+  try {
+    const apiKey = process.env.REVENUECAT_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: 'RevenueCat API key not configured' });
+    }
+    // Llama a la API REST de RevenueCat para obtener los offerings
+    const response = await fetch('https://api.revenuecat.com/v1/offerings', {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Accept': 'application/json',
+      },
+    });
+    if (!response.ok) {
+      const errorText = await response.text();
+      return res.status(response.status).json({ error: 'RevenueCat API error', details: errorText });
+    }
+    const data = await response.json();
+    res.json({ success: true, offerings: data });
+  } catch (error) {
+    console.error('Error fetching RevenueCat offerings:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
 // Error handling middleware
 app.use((error, req, res, next) => {
   console.error('Error:', error);
@@ -128,6 +244,15 @@ app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📍 Health check: http://localhost:${PORT}/health`);
   console.log(`🔍 Analyze endpoint: http://localhost:${PORT}/api/analyze`);
+  
+  // Log Lemon Squeezy configuration status
+  try {
+    validateConfig();
+    console.log(`🍋 Lemon Squeezy config → STORE_ID: ✔, API_KEY: ✔, WEBHOOK_SECRET: ✔`);
+  } catch (error) {
+    console.log(`🍋 Lemon Squeezy config → STORE_ID: ${process.env.LEMONSQUEEZY_STORE_ID ? '✔' : '✖'}, API_KEY: ${!!process.env.LEMONSQUEEZY_API_KEY ? '✔' : '✖'}, WEBHOOK_SECRET: ${!!process.env.LEMONSQUEEZY_WEBHOOK_SECRET ? '✔' : '✖'}`);
+    console.log(`⚠️  Lemon Squeezy not fully configured: ${error.message}`);
+  }
 });
 
 module.exports = app; 

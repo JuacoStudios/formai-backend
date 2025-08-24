@@ -4,6 +4,7 @@ const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
 const { OpenAI } = require('openai');
+const Stripe = require('stripe'); // STRIPE: Add Stripe SDK
 const { 
   getProducts, 
   createCheckout, 
@@ -15,8 +16,14 @@ const {
 const app = express();
 const PORT = process.env.PORT || 8080;
 
+// STRIPE: Initialize Stripe with environment variable
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { 
+  apiVersion: "2024-06-20" 
+});
+
 // Middleware
 app.use(cors());
+app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Configure multer for handling file uploads
@@ -53,6 +60,50 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// Debug endpoint for body parsing verification
+app.post('/api/debug/echo', (req, res) => {
+  console.log('🔍 Debug echo request body:', req.body);
+  res.json({ 
+    success: true,
+    body: req.body,
+    headers: req.headers,
+    timestamp: Date.now()
+  });
+});
+
+// STRIPE: Create Stripe Checkout for subscriptions
+app.post("/api/create-checkout-session", async (req, res) => {
+  try {
+    const { priceId, customerEmail, successUrl, cancelUrl } = req.body || {};
+    if (!priceId) return res.status(400).json({ success: false, error: "priceId is required" });
+    
+    console.log('💳 Creating Stripe checkout for priceId:', priceId);
+    
+    const session = await stripe.checkout.sessions.create({
+      mode: "subscription",
+      payment_method_types: ["card"],
+      line_items: [{ price: String(priceId), quantity: 1 }],
+      customer_email: customerEmail,
+      success_url: successUrl || "formai://purchase/success",
+      cancel_url: cancelUrl || "formai://purchase/cancel"
+    });
+    
+    console.log('✅ Stripe checkout session created:', session.id);
+    return res.json({ success: true, url: session.url });
+  } catch (err) {
+    console.error("❌ Stripe create-checkout-session error:", err?.message || err);
+    return res.status(500).json({ success: false, error: "Failed to create checkout session" });
+  }
+});
+
+// STRIPE: Info route to expose configured price IDs (safe, no secrets)
+app.get("/api/stripe/prices", (_req, res) => {
+  res.json({
+    monthly: process.env.STRIPE_PRICE_ID_MONTHLY ? "configured" : "missing",
+    annual: process.env.STRIPE_PRICE_ID_ANNUAL ? "configured" : "missing"
+  });
+});
+
 // Lemon Squeezy products endpoint
 app.get('/api/products', async (req, res) => {
   try {
@@ -73,26 +124,37 @@ app.get('/api/products', async (req, res) => {
 // Lemon Squeezy create checkout endpoint
 app.post('/api/create-checkout', async (req, res) => {
   try {
-    const { variantId, customerEmail, redirectUrl } = req.body;
+    console.log('📝 Received checkout request body:', req.body);
+    
+    // Read body with tolerance for different keys
+    const variantId = 
+      req.body?.variantId ?? 
+      req.body?.variant_id ?? 
+      req.body?.variant ?? 
+      req.body?.id;
     
     if (!variantId) {
+      console.error('❌ Missing variantId in request body:', req.body);
       return res.status(400).json({ 
         success: false, 
-        error: 'variantId is required' 
+        error: 'variantId is required',
+        received: req.body 
       });
     }
 
-    const checkoutUrl = await createCheckout(variantId, customerEmail, redirectUrl);
+    console.log('✅ Creating checkout for variantId:', variantId);
+    const checkoutUrl = await createCheckout(variantId, req.body.customerEmail, req.body.redirectUrl);
     
     res.json({ 
       success: true, 
       checkoutUrl 
     });
   } catch (error) {
-    console.error('Error creating checkout:', error);
+    console.error('❌ Error creating checkout:', error);
     res.status(500).json({ 
       success: false, 
-      error: 'Failed to create checkout' 
+      error: 'Failed to create checkout',
+      details: error.message 
     });
   }
 });
@@ -125,6 +187,49 @@ app.post('/webhooks/lemonsqueezy', express.raw({ type: '*/*' }), async (req, res
     console.error('Error processing webhook:', error);
     // Still return 200 to avoid retries, but log the error
     res.status(200).send('ok');
+  }
+});
+
+// STRIPE: Webhook needs raw body for signature verification
+app.post("/webhooks/stripe", express.raw({ type: "application/json" }), async (req, res) => {
+  const sig = req.headers["stripe-signature"];
+  
+  try {
+    if (!sig) {
+      console.error('❌ Missing Stripe signature header');
+      return res.status(400).send('Missing signature');
+    }
+    
+    const event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+    
+    // Handle events relevant to subscriptions
+    switch (event.type) {
+      case "checkout.session.completed": {
+        const session = event.data.object;
+        console.log("✅ checkout.session.completed", session.id, session.customer_email);
+        // TODO: mark user PRO in DB using email or metadata
+        break;
+      }
+      case "invoice.payment_failed": {
+        const invoice = event.data.object;
+        console.log("⚠️ invoice.payment_failed", invoice.id, invoice.customer_email);
+        // TODO: optionally flag grace period / downgrade
+        break;
+      }
+      case "customer.subscription.deleted": {
+        const sub = event.data.object;
+        console.log("🪓 subscription deleted", sub.id);
+        // TODO: downgrade user to FREE
+        break;
+      }
+      default:
+        console.log(`ℹ️ Unhandled Stripe event: ${event.type}`);
+    }
+    
+    return res.json({ received: true });
+  } catch (err) {
+    console.error("❌ Stripe webhook error:", err?.message || err);
+    return res.status(400).send(`Webhook Error: ${err?.message || "invalid signature"}`);
   }
 });
 
@@ -253,6 +358,14 @@ app.listen(PORT, () => {
     console.log(`🍋 Lemon Squeezy config → STORE_ID: ${process.env.LEMONSQUEEZY_STORE_ID ? '✔' : '✖'}, API_KEY: ${!!process.env.LEMONSQUEEZY_API_KEY ? '✔' : '✖'}, WEBHOOK_SECRET: ${!!process.env.LEMONSQUEEZY_WEBHOOK_SECRET ? '✔' : '✖'}`);
     console.log(`⚠️  Lemon Squeezy not fully configured: ${error.message}`);
   }
+  
+  // STRIPE: Log Stripe configuration status
+  console.log("💳 Stripe config →",
+    "SECRET:", !!process.env.STRIPE_SECRET_KEY,
+    "WEBHOOK:", !!process.env.STRIPE_WEBHOOK_SECRET,
+    "MONTHLY:", !!process.env.STRIPE_PRICE_ID_MONTHLY,
+    "ANNUAL:", !!process.env.STRIPE_PRICE_ID_ANNUAL
+  );
 });
 
 module.exports = app; 

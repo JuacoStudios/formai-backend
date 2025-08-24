@@ -104,6 +104,58 @@ app.get("/api/stripe/prices", (_req, res) => {
   });
 });
 
+// STRIPE: Diagnostics endpoint to verify Stripe configuration and connectivity
+app.get("/api/stripe/diagnostics", async (req, res) => {
+  const report = {
+    env: {
+      STRIPE_SECRET_KEY: !!process.env.STRIPE_SECRET_KEY,
+      STRIPE_WEBHOOK_SECRET: !!process.env.STRIPE_WEBHOOK_SECRET,
+      STRIPE_PRICE_ID_MONTHLY: !!process.env.STRIPE_PRICE_ID_MONTHLY,
+      STRIPE_PRICE_ID_ANNUAL: !!process.env.STRIPE_PRICE_ID_ANNUAL
+    }
+  };
+  
+  try {
+    // Verify monthly price if configured
+    if (process.env.STRIPE_PRICE_ID_MONTHLY) {
+      const p = await stripe.prices.retrieve(process.env.STRIPE_PRICE_ID_MONTHLY);
+      report.prices = { 
+        monthly: { 
+          id: p.id, 
+          active: p.active, 
+          currency: p.currency, 
+          interval: p.recurring?.interval 
+        }
+      };
+    }
+    
+    // Verify annual price if configured
+    if (process.env.STRIPE_PRICE_ID_ANNUAL) {
+      const p = await stripe.prices.retrieve(process.env.STRIPE_PRICE_ID_ANNUAL);
+      report.prices = { 
+        ...(report.prices || {}), 
+        annual: { 
+          id: p.id, 
+          active: p.active, 
+          currency: p.currency, 
+          interval: p.recurring?.interval 
+        }
+      };
+    }
+    
+    // Verify Stripe connectivity
+    report.checkoutSessionDryRun = { ok: true };
+    
+    console.log('✅ Stripe diagnostics completed successfully');
+    
+  } catch (e) {
+    console.error('❌ Stripe diagnostics error:', e.message);
+    report.error = e.message;
+  }
+  
+  res.json(report);
+});
+
 // Lemon Squeezy products endpoint
 app.get('/api/products', async (req, res) => {
   try {

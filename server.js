@@ -74,19 +74,28 @@ app.post('/api/debug/echo', (req, res) => {
 // STRIPE: Create Stripe Checkout for subscriptions
 app.post("/api/create-checkout-session", async (req, res) => {
   try {
-    const { priceId, customerEmail, successUrl, cancelUrl } = req.body || {};
+    const { priceId, customerEmail, successUrl, cancelUrl, promotionCode } = req.body || {};
     if (!priceId) return res.status(400).json({ success: false, error: "priceId is required" });
     
-    console.log('💳 Creating Stripe checkout for priceId:', priceId);
+    console.log('💳 Creating Stripe checkout for priceId:', priceId, promotionCode ? `with promotion code: ${promotionCode}` : '');
     
-    const session = await stripe.checkout.sessions.create({
+    const params = {
       mode: "subscription",
       payment_method_types: ["card"],
       line_items: [{ price: String(priceId), quantity: 1 }],
       customer_email: customerEmail,
       success_url: successUrl || "formai://purchase/success",
-      cancel_url: cancelUrl || "formai://purchase/cancel"
-    });
+      cancel_url: cancelUrl || "formai://purchase/cancel",
+      allow_promotion_codes: true
+    };
+    
+    // Add promotion code if provided
+    if (promotionCode) {
+      params.discounts = [{ promotion_code: promotionCode }];
+      console.log('🎫 Applying promotion code:', promotionCode);
+    }
+    
+    const session = await stripe.checkout.sessions.create(params);
     
     console.log('✅ Stripe checkout session created:', session.id);
     return res.json({ success: true, url: session.url });

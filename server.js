@@ -21,10 +21,33 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: "2024-06-20" 
 });
 
+// Simple in-memory store for subscriptions by userId
+// Replace later with a DB if needed
+const Subscriptions = new Map(); // key: userId, value: { active, plan, currentPeriodEnd, customerId, subscriptionId }
+
 // Middleware
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// CORS configuration for production and development
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
+const devOrigins = ['http://localhost:8081', 'http://localhost:8082', 'http://localhost:19006'];
+
+// Add Vercel domains and configured origins
+const corsOrigins = [
+  ...allowedOrigins,
+  ...devOrigins,
+  /\.vercel\.app$/,
+  /\.vercel\.dev$/
+];
+
+app.use(cors({
+  origin: corsOrigins,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Accept'],
+  credentials: true
+}));
 
 // Configure multer for handling file uploads
 const storage = multer.memoryStorage();
@@ -56,7 +79,8 @@ app.get('/health', (req, res) => {
 app.get('/api/health', (req, res) => {
   res.json({ 
     ok: true, 
-    ts: Date.now() 
+    ts: Date.now(),
+    origin: req.get('origin') || null
   });
 });
 
@@ -74,19 +98,39 @@ app.post('/api/debug/echo', (req, res) => {
 // STRIPE: Create Stripe Checkout for subscriptions
 app.post("/api/create-checkout-session", async (req, res) => {
   try {
-    const { priceId, customerEmail, successUrl, cancelUrl, promotionCode } = req.body || {};
-    if (!priceId) return res.status(400).json({ success: false, error: "priceId is required" });
+    const { priceId, customerEmail, userId, successUrl, cancelUrl, promotionCode } = req.body || {};
     
-    console.log('💳 Creating Stripe checkout for priceId:', priceId, promotionCode ? `with promotion code: ${promotionCode}` : '');
+    // Log all incoming data for debugging
+    console.log('💳 Stripe checkout request:', { priceId, customerEmail, userId, successUrl, cancelUrl, promotionCode });
+    
+    if (!priceId || !customerEmail || !userId || !successUrl || !cancelUrl) {
+      console.error('❌ Missing required fields:', { priceId: !!priceId, customerEmail: !!customerEmail, userId: !!userId, successUrl: !!successUrl, cancelUrl: !!cancelUrl });
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+    
+    // Validate price ID format
+    if (!priceId?.startsWith('price_')) {
+      console.error('❌ Invalid price ID format:', priceId);
+      return res.status(400).json({ error: 'INVALID_PRICE_ID', message: 'Price ID must start with "price_"' });
+    }
+    
+    console.log('💳 Creating Stripe checkout for priceId:', priceId, 'userId:', userId, promotionCode ? `with promotion code: ${promotionCode}` : '');
     
     const params = {
       mode: "subscription",
-      payment_method_types: ["card"],
       line_items: [{ price: String(priceId), quantity: 1 }],
+      automatic_tax: { enabled: false },
+      ui_mode: 'hosted',
+      client_reference_id: userId,
       customer_email: customerEmail,
-      success_url: successUrl || "formai://purchase/success",
-      cancel_url: cancelUrl || "formai://purchase/cancel",
-      allow_promotion_codes: true
+      success_url: successUrl,
+      cancel_url: cancelUrl,
+      allow_promotion_codes: true,
+      // Ensure the subscription carries userId for later webhook correlation
+      subscription_data: {
+        metadata: { userId, email: customerEmail },
+      },
+      metadata: { userId, email: customerEmail },
     };
     
     // Add promotion code if provided
@@ -97,11 +141,11 @@ app.post("/api/create-checkout-session", async (req, res) => {
     
     const session = await stripe.checkout.sessions.create(params);
     
-    console.log('✅ Stripe checkout session created:', session.id);
-    return res.json({ success: true, url: session.url });
+    console.log('✅ Stripe checkout session created:', session.id, 'for userId:', userId);
+    return res.json({ id: session.id, url: session.url });
   } catch (err) {
     console.error("❌ Stripe create-checkout-session error:", err?.message || err);
-    return res.status(500).json({ success: false, error: "Failed to create checkout session" });
+    return res.status(500).json({ error: err.message || "Stripe session creation failed" });
   }
 });
 
@@ -155,6 +199,9 @@ app.get("/api/stripe/diagnostics", async (req, res) => {
     // Verify Stripe connectivity
     report.checkoutSessionDryRun = { ok: true };
     
+    // Add cache information
+    report.cacheSize = Subscriptions.size;
+    
     console.log('✅ Stripe diagnostics completed successfully');
     
   } catch (e) {
@@ -175,10 +222,73 @@ app.get('/api/products', async (req, res) => {
     });
   } catch (error) {
     console.error('Error fetching products:', error);
+    
+    // Check if it's a missing price IDs error
+    if (!process.env.STRIPE_PRICE_ID_MONTHLY || !process.env.STRIPE_PRICE_ID_ANNUAL) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'MISSING_PRICE_IDS',
+        message: 'Stripe price IDs not configured in environment'
+      });
+    }
+    
     res.status(500).json({ 
       success: false, 
       error: error.message || 'Failed to fetch products' 
     });
+  }
+});
+
+// STRIPE: Products endpoint for Stripe price IDs
+app.get('/api/stripe/products', async (req, res) => {
+  try {
+    const monthlyId = process.env.STRIPE_PRICE_ID_MONTHLY;
+    const annualId = process.env.STRIPE_PRICE_ID_ANNUAL;
+    
+    if (!monthlyId || !annualId) {
+      return res.status(400).json({ 
+        error: "MISSING_PRICE_IDS",
+        message: "Stripe price IDs not configured in environment"
+      });
+    }
+    
+    res.json({
+      monthly: monthlyId ? { id: monthlyId, active: true } : null,
+      annual: annualId ? { id: annualId, active: true } : null
+    });
+  } catch (error) {
+    console.error('Error in /api/stripe/products:', error);
+    res.status(500).json({ 
+      error: "Failed to get Stripe products",
+      message: error.message 
+    });
+  }
+});
+
+// POST /api/checkout  body: { plan: 'monthly' | 'annual' }
+app.post('/api/checkout', async (req, res) => {
+  try {
+    const plan = (req.body?.plan === 'annual') ? 'annual' : 'monthly';
+    const priceId = plan === 'annual'
+      ? process.env.STRIPE_ANNUAL_PRICE_ID
+      : process.env.STRIPE_MONTHLY_PRICE_ID;
+
+    if (!priceId) {
+      return res.status(400).json({ error: 'Missing priceId' });
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      mode: 'subscription',                       // use 'payment' for one-time
+      line_items: [{ price: priceId, quantity: 1 }],
+      ui_mode: 'hosted',
+      success_url: `${process.env.WEB_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.WEB_URL}/pricing?canceled=1`,
+    });
+
+    return res.json({ id: session.id, url: session.url });
+  } catch (e) {
+    console.error('[checkout] error:', e);
+    return res.status(500).json({ error: e?.message || 'checkout_failed' });
   }
 });
 
@@ -254,43 +364,161 @@ app.post('/webhooks/lemonsqueezy', express.raw({ type: '*/*' }), async (req, res
 // STRIPE: Webhook needs raw body for signature verification
 app.post("/webhooks/stripe", express.raw({ type: "application/json" }), async (req, res) => {
   const sig = req.headers["stripe-signature"];
-  
+  let event;
+
   try {
     if (!sig) {
       console.error('❌ Missing Stripe signature header');
       return res.status(400).send('Missing signature');
     }
     
-    const event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+    event = stripe.webhooks.constructEvent(
+      req.body,
+      sig,
+      process.env.STRIPE_WEBHOOK_SECRET
+    );
+  } catch (err) {
+    console.error("❌ Webhook signature verification failed:", err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  const handleSubscriptionUpsert = (subObj) => {
+    const metaUserId = subObj?.metadata?.userId;
+    if (!metaUserId) {
+      console.warn("⚠️ Subscription without userId metadata");
+      return;
+    }
+    const status = subObj.status; // 'active', 'trialing', 'incomplete', 'canceled', etc.
+    const active = status === "active" || status === "trialing";
+    const price = subObj.items?.data?.[0]?.price;
+    const plan =
+      price?.recurring?.interval === "month" ? "monthly" :
+      price?.recurring?.interval === "year"  ? "annual"  : undefined;
+
+    Subscriptions.set(metaUserId, {
+      active,
+      plan,
+      currentPeriodEnd: subObj.current_period_end ? subObj.current_period_end * 1000 : undefined,
+      customerId: subObj.customer,
+      subscriptionId: subObj.id,
+    });
+    console.log("✅ Upserted subscription for", metaUserId, Subscriptions.get(metaUserId));
+  };
+
+  switch (event.type) {
+    case "checkout.session.completed": {
+      const session = event.data.object;
+      // We set both client_reference_id and metadata.userId at session creation
+      const userId = session.client_reference_id || session?.metadata?.userId;
+      if (userId && session.subscription) {
+        // Fetch the subscription to grab recurring info + metadata
+        stripe.subscriptions.retrieve(session.subscription)
+          .then((sub) => handleSubscriptionUpsert(sub))
+          .catch((e) => console.error("Error fetching subscription after checkout:", e));
+      }
+      break;
+    }
+    case "customer.subscription.created":
+    case "customer.subscription.updated":
+    case "customer.subscription.deleted": {
+      const subscription = event.data.object;
+      handleSubscriptionUpsert(subscription);
+      break;
+    }
+    default:
+      // Ignore other events
+      console.log(`ℹ️ Unhandled Stripe event: ${event.type}`);
+      break;
+  }
+
+  res.json({ received: true });
+});
+
+// STRIPE: Get subscription status for a given userId
+app.get("/api/subscription/status", async (req, res) => {
+  try {
+    const { userId } = req.query;
     
-    // Handle events relevant to subscriptions
-    switch (event.type) {
-      case "checkout.session.completed": {
-        const session = event.data.object;
-        console.log("✅ checkout.session.completed", session.id, session.customer_email);
-        // TODO: mark user PRO in DB using email or metadata
-        break;
-      }
-      case "invoice.payment_failed": {
-        const invoice = event.data.object;
-        console.log("⚠️ invoice.payment_failed", invoice.id, invoice.customer_email);
-        // TODO: optionally flag grace period / downgrade
-        break;
-      }
-      case "customer.subscription.deleted": {
-        const sub = event.data.object;
-        console.log("🪓 subscription deleted", sub.id);
-        // TODO: downgrade user to FREE
-        break;
-      }
-      default:
-        console.log(`ℹ️ Unhandled Stripe event: ${event.type}`);
+    if (!userId || typeof userId !== 'string') {
+      return res.status(400).json({ 
+        active: false, 
+        plan: null, 
+        source: "stripe",
+        error: "Valid userId parameter is required" 
+      });
     }
     
-    return res.json({ received: true });
+    console.log('🔍 Checking subscription status for userId:', userId);
+    
+    // Check in-memory store first
+    const record = Subscriptions.get(userId);
+    if (record) {
+      console.log('✅ Subscription found in cache for userId:', userId, record);
+      return res.json(record);
+    }
+    
+    // Fallback: try to find by email if userId not in cache
+    // This handles legacy cases where we might not have userId in metadata yet
+    console.log('⚠️ userId not found in cache, checking Stripe directly...');
+    
+    // For now, return not active if not in cache
+    // The webhook will populate the cache when events come in
+    return res.json({ 
+      active: false, 
+      plan: null, 
+      source: "stripe" 
+    });
+    
   } catch (err) {
-    console.error("❌ Stripe webhook error:", err?.message || err);
-    return res.status(400).send(`Webhook Error: ${err?.message || "invalid signature"}`);
+    console.error("❌ Subscription status check error:", err?.message || err);
+    return res.status(500).json({ 
+      active: false, 
+      plan: null, 
+      source: "stripe",
+      error: "Failed to check subscription status" 
+    });
+  }
+});
+
+// STRIPE: POST alias for subscription status (same logic)
+app.post("/api/subscription/refresh", async (req, res) => {
+  try {
+    const { userId } = req.body || {};
+    
+    if (!userId || typeof userId !== 'string') {
+      return res.status(400).json({ 
+        active: false, 
+        plan: null, 
+        source: "stripe",
+        error: "Valid userId in request body is required" 
+      });
+    }
+    
+    console.log('🔄 Refreshing subscription status for userId:', userId);
+    
+    // Check in-memory store
+    const record = Subscriptions.get(userId);
+    if (record) {
+      console.log('✅ Subscription found in cache for userId:', userId, record);
+      return res.json(record);
+    }
+    
+    // For now, return not active if not in cache
+    // The webhook will populate the cache when events come in
+    return res.json({ 
+      active: false, 
+      plan: null, 
+      source: "stripe" 
+    });
+    
+  } catch (err) {
+    console.error("❌ Subscription refresh error:", err?.message || err);
+    return res.status(500).json({ 
+      active: false, 
+      plan: null, 
+      source: "stripe",
+      error: "Failed to refresh subscription status" 
+    });
   }
 });
 
@@ -410,6 +638,11 @@ app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📍 Health check: http://localhost:${PORT}/health`);
   console.log(`🔍 Analyze endpoint: http://localhost:${PORT}/api/analyze`);
+  console.log(`💳 Checkout endpoint: http://localhost:${PORT}/api/checkout`);
+  
+  // Log configuration status
+  console.log(`🌐 WEB_URL: ${process.env.WEB_URL || 'NOT_SET'}`);
+  console.log(`🔒 ALLOWED_ORIGINS: ${process.env.ALLOWED_ORIGINS || 'NOT_SET'}`);
   
   // Log Lemon Squeezy configuration status
   try {
@@ -424,9 +657,19 @@ app.listen(PORT, () => {
   console.log("💳 Stripe config →",
     "SECRET:", !!process.env.STRIPE_SECRET_KEY,
     "WEBHOOK:", !!process.env.STRIPE_WEBHOOK_SECRET,
-    "MONTHLY:", !!process.env.STRIPE_PRICE_ID_MONTHLY,
-    "ANNUAL:", !!process.env.STRIPE_PRICE_ID_ANNUAL
+    "MONTHLY:", !!process.env.STRIPE_MONTHLY_PRICE_ID,
+    "ANNUAL:", !!process.env.STRIPE_ANNUAL_PRICE_ID
   );
+  
+  // Checkout endpoint status
+  console.log('[checkout] ready', {
+    WEB_URL: process.env.WEB_URL,
+    MONTHLY: !!process.env.STRIPE_MONTHLY_PRICE_ID,
+    ANNUAL: !!process.env.STRIPE_ANNUAL_PRICE_ID,
+  });
+  
+  // Log mounted endpoints
+  console.log("✅ Mounted endpoints: /api/checkout, /api/create-checkout-session, /api/stripe/products");
 });
 
 module.exports = app; 

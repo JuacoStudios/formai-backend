@@ -1,8 +1,11 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const cookieParser = require('cookie-parser');
 const multer = require('multer');
 const path = require('path');
+const { v4: uuidv4 } = require('uuid');
+const { z } = require('zod');
 const { OpenAI } = require('openai');
 const Stripe = require('stripe'); // STRIPE: Add Stripe SDK
 const { 
@@ -12,9 +15,17 @@ const {
   processWebhookEvent,
   validateConfig 
 } = require('./lemonsqueezy');
+const { 
+  getEntitlementByDevice, 
+  canPerformScan, 
+  incrementScanUsage 
+} = require('./src/lib/entitlement');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
+
+// Trust proxy for secure cookies behind Render/NGINX
+app.set('trust proxy', 1);
 
 // STRIPE: Initialize Stripe with environment variable
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { 
@@ -25,29 +36,254 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
 // Replace later with a DB if needed
 const Subscriptions = new Map(); // key: userId, value: { active, plan, currentPeriodEnd, customerId, subscriptionId }
 
-// Middleware
-app.use(cors());
+// STRIPE: Webhook needs raw body for signature verification - MUST be before JSON parsing
+app.post("/webhooks/stripe", express.raw({ type: "application/json" }), async (req, res) => {
+  const sig = req.headers["stripe-signature"];
+  let event;
+
+  try {
+    if (!sig) {
+      console.error('❌ Missing Stripe signature header');
+      return res.status(400).send('Missing signature');
+    }
+    
+    event = stripe.webhooks.constructEvent(
+      req.body,
+      sig,
+      process.env.STRIPE_WEBHOOK_SECRET
+    );
+  } catch (err) {
+    console.error("❌ Webhook signature verification failed:", err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  // Idempotency check - if we've already processed this event, return 200
+  const { prisma } = require('./src/db/prisma');
+  const existingEvent = await prisma.webhookEvent.findUnique({
+    where: { id: event.id }
+  });
+
+  if (existingEvent) {
+    console.log(`ℹ️ Event ${event.id} already processed, skipping`);
+    return res.status(200).send('ok');
+  }
+
+  // Store the event for idempotency
+  await prisma.webhookEvent.create({
+    data: {
+      id: event.id,
+      provider: 'stripe',
+      type: event.type,
+      payload: event
+    }
+  });
+
+  try {
+    switch (event.type) {
+      case "checkout.session.completed": {
+        const session = event.data.object;
+        const deviceId = session.client_reference_id || session?.metadata?.deviceId;
+        
+        if (deviceId && session.mode === 'subscription' && session.subscription) {
+          // Create device mappings for subscription and customer
+          await prisma.deviceMap.createMany({
+            data: [
+              {
+                provider: 'stripe',
+                key: `subscription:${session.subscription}`,
+                deviceId
+              },
+              {
+                provider: 'stripe',
+                key: `customer:${session.customer}`,
+                deviceId
+              }
+            ],
+            skipDuplicates: true
+          });
+          
+          console.log(`✅ Created device mappings for device ${deviceId}`);
+        }
+        break;
+      }
+      
+      case "customer.subscription.created":
+      case "customer.subscription.updated": {
+        const subscription = event.data.object;
+        const subId = subscription.id;
+        const customerId = subscription.customer;
+        
+        // Find device by subscription or customer mapping
+        const deviceMap = await prisma.deviceMap.findFirst({
+          where: {
+            OR: [
+              { provider: 'stripe', key: `subscription:${subId}` },
+              { provider: 'stripe', key: `customer:${customerId}` }
+            ]
+          }
+        });
+        
+        if (deviceMap) {
+          const status = subscription.status;
+          const price = subscription.items?.data?.[0]?.price;
+          const plan = price?.recurring?.interval === "month" ? "monthly" : 
+                      price?.recurring?.interval === "year" ? "annual" : null;
+          
+          // Upsert subscription
+          await prisma.subscription.upsert({
+            where: { providerSubscriptionId: subId },
+            update: {
+              status,
+              plan,
+              currentPeriodEnd: subscription.current_period_end ? 
+                new Date(subscription.current_period_end * 1000) : null,
+              cancelAtPeriodEnd: subscription.cancel_at_period_end ? 
+                new Date(subscription.cancel_at_period_end * 1000) : null,
+              deviceId: deviceMap.deviceId
+            },
+            create: {
+              provider: 'stripe',
+              providerCustomerId: customerId,
+              providerSubscriptionId: subId,
+              status,
+              plan,
+              currentPeriodEnd: subscription.current_period_end ? 
+                new Date(subscription.current_period_end * 1000) : null,
+              cancelAtPeriodEnd: subscription.cancel_at_period_end ? 
+                new Date(subscription.cancel_at_period_end * 1000) : null,
+              deviceId: deviceMap.deviceId
+            }
+          });
+          
+          console.log(`✅ Upserted subscription ${subId} for device ${deviceMap.deviceId}`);
+        } else {
+          console.warn(`⚠️ No device mapping found for subscription ${subId}`);
+        }
+        break;
+      }
+      
+      case "customer.subscription.deleted": {
+        const subscription = event.data.object;
+        const subId = subscription.id;
+        
+        // Update subscription status to canceled
+        await prisma.subscription.updateMany({
+          where: { providerSubscriptionId: subId },
+          data: { status: 'canceled' }
+        });
+        
+        console.log(`✅ Marked subscription ${subId} as canceled`);
+        break;
+      }
+      
+      default:
+        console.log(`ℹ️ Unhandled Stripe event: ${event.type}`);
+        break;
+    }
+  } catch (error) {
+    console.error(`❌ Error processing webhook event ${event.id}:`, error);
+    // Still return 200 to avoid retries
+  }
+
+  res.status(200).send('ok');
+});
+
+// Lemon Squeezy webhook endpoint (must use raw body) - MUST be before JSON parsing
+app.post('/webhooks/lemonsqueezy', express.raw({ type: '*/*' }), async (req, res) => {
+  try {
+    const signature = req.headers['x-signature'];
+    
+    if (!signature) {
+      console.error('Missing X-Signature header');
+      return res.status(400).send('Missing signature');
+    }
+
+    // Verify webhook signature
+    if (!verifyWebhookSignature(req.body, signature)) {
+      console.error('Invalid webhook signature');
+      return res.status(400).send('Invalid signature');
+    }
+
+    // Parse the raw body
+    const payload = JSON.parse(req.body.toString('utf8'));
+    
+    // Process the webhook event
+    processWebhookEvent(payload);
+    
+    // Always return 200 to avoid retries
+    res.status(200).send('ok');
+  } catch (error) {
+    console.error('Error processing webhook:', error);
+    // Still return 200 to avoid retries, but log the error
+    res.status(200).send('ok');
+  }
+});
+
+// CORS allowlist with credentials
+const allowed = (process.env.CORS_ALLOWED_ORIGINS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+const corsOptions = {
+  origin(origin, cb) {
+    // allow same-origin / server-to-server or tools without Origin
+    if (!origin) return cb(null, true);
+    if (allowed.includes(origin)) return cb(null, true);
+    return cb(new Error(`CORS: Origin not allowed → ${origin}`));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+};
+
+app.use((req, res, next) => { res.header('Vary', 'Origin'); next(); });
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
+
+// Cookie parser and JSON body parser
+app.use(cookieParser());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// CORS configuration for production and development
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
-const devOrigins = ['http://localhost:8081', 'http://localhost:8082', 'http://localhost:19006'];
+// Security hardening
+app.disable('x-powered-by');
 
-// Add Vercel domains and configured origins
-const corsOrigins = [
-  ...allowedOrigins,
-  ...devOrigins,
-  /\.vercel\.app$/,
-  /\.vercel\.dev$/
-];
+// ensureDeviceId middleware for /api/* only
+async function ensureDeviceId(req, res, next) {
+  let id = req.cookies['fa_device'];
+  const isProd = process.env.NODE_ENV === 'production';
 
-app.use(cors({
-  origin: corsOrigins,
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Accept'],
-  credentials: true
-}));
+  if (!id) {
+    id = uuidv4();
+    res.cookie('fa_device', id, {
+      httpOnly: true,
+      secure: isProd,                          // requires HTTPS in prod
+      sameSite: isProd ? 'none' : 'lax',       // cross-site cookie for Vercel → Render
+      path: '/',
+      maxAge: 365 * 24 * 60 * 60 * 1000,       // 1 year
+    });
+  }
+  
+  // Upsert device in database
+  try {
+    const { prisma } = require('./src/db/prisma');
+    await prisma.device.upsert({
+      where: { id },
+      update: { lastSeen: new Date() },
+      create: { id, lastSeen: new Date() }
+    });
+  } catch (error) {
+    console.error('Error upserting device:', error);
+    // Continue anyway - don't block the request
+  }
+  
+  req.deviceId = id;
+  next();
+}
+
+// Apply device ID middleware only to API routes
+app.use('/api', ensureDeviceId);
 
 // Configure multer for handling file uploads
 const storage = multer.memoryStorage();
@@ -330,109 +566,7 @@ app.post('/api/create-checkout', async (req, res) => {
   }
 });
 
-// Lemon Squeezy webhook endpoint (must use raw body)
-app.post('/webhooks/lemonsqueezy', express.raw({ type: '*/*' }), async (req, res) => {
-  try {
-    const signature = req.headers['x-signature'];
-    
-    if (!signature) {
-      console.error('Missing X-Signature header');
-      return res.status(400).send('Missing signature');
-    }
 
-    // Verify webhook signature
-    if (!verifyWebhookSignature(req.body, signature)) {
-      console.error('Invalid webhook signature');
-      return res.status(400).send('Invalid signature');
-    }
-
-    // Parse the raw body
-    const payload = JSON.parse(req.body.toString('utf8'));
-    
-    // Process the webhook event
-    processWebhookEvent(payload);
-    
-    // Always return 200 to avoid retries
-    res.status(200).send('ok');
-  } catch (error) {
-    console.error('Error processing webhook:', error);
-    // Still return 200 to avoid retries, but log the error
-    res.status(200).send('ok');
-  }
-});
-
-// STRIPE: Webhook needs raw body for signature verification
-app.post("/webhooks/stripe", express.raw({ type: "application/json" }), async (req, res) => {
-  const sig = req.headers["stripe-signature"];
-  let event;
-
-  try {
-    if (!sig) {
-      console.error('❌ Missing Stripe signature header');
-      return res.status(400).send('Missing signature');
-    }
-    
-    event = stripe.webhooks.constructEvent(
-      req.body,
-      sig,
-      process.env.STRIPE_WEBHOOK_SECRET
-    );
-  } catch (err) {
-    console.error("❌ Webhook signature verification failed:", err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
-
-  const handleSubscriptionUpsert = (subObj) => {
-    const metaUserId = subObj?.metadata?.userId;
-    if (!metaUserId) {
-      console.warn("⚠️ Subscription without userId metadata");
-      return;
-    }
-    const status = subObj.status; // 'active', 'trialing', 'incomplete', 'canceled', etc.
-    const active = status === "active" || status === "trialing";
-    const price = subObj.items?.data?.[0]?.price;
-    const plan =
-      price?.recurring?.interval === "month" ? "monthly" :
-      price?.recurring?.interval === "year"  ? "annual"  : undefined;
-
-    Subscriptions.set(metaUserId, {
-      active,
-      plan,
-      currentPeriodEnd: subObj.current_period_end ? subObj.current_period_end * 1000 : undefined,
-      customerId: subObj.customer,
-      subscriptionId: subObj.id,
-    });
-    console.log("✅ Upserted subscription for", metaUserId, Subscriptions.get(metaUserId));
-  };
-
-  switch (event.type) {
-    case "checkout.session.completed": {
-      const session = event.data.object;
-      // We set both client_reference_id and metadata.userId at session creation
-      const userId = session.client_reference_id || session?.metadata?.userId;
-      if (userId && session.subscription) {
-        // Fetch the subscription to grab recurring info + metadata
-        stripe.subscriptions.retrieve(session.subscription)
-          .then((sub) => handleSubscriptionUpsert(sub))
-          .catch((e) => console.error("Error fetching subscription after checkout:", e));
-      }
-      break;
-    }
-    case "customer.subscription.created":
-    case "customer.subscription.updated":
-    case "customer.subscription.deleted": {
-      const subscription = event.data.object;
-      handleSubscriptionUpsert(subscription);
-      break;
-    }
-    default:
-      // Ignore other events
-      console.log(`ℹ️ Unhandled Stripe event: ${event.type}`);
-      break;
-  }
-
-  res.json({ received: true });
-});
 
 // STRIPE: Get subscription status for a given userId
 app.get("/api/subscription/status", async (req, res) => {
@@ -522,8 +656,121 @@ app.post("/api/subscription/refresh", async (req, res) => {
   }
 });
 
-// Analyze equipment endpoint
-app.post('/api/analyze', upload.single('image'), async (req, res) => {
+
+
+// RevenueCat Offerings endpoint
+app.get('/api/revenuecat/offerings', async (req, res) => {
+  try {
+    const apiKey = process.env.REVENUECAT_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: 'RevenueCat API key not configured' });
+    }
+    // Llama a la API REST de RevenueCat para obtener los offerings
+    const response = await fetch('https://api.revenuecat.com/v1/offerings', {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Accept': 'application/json',
+      },
+    });
+    if (!response.ok) {
+      const errorText = await response.text();
+      return res.status(response.status).json({ error: 'RevenueCat API error', details: errorText });
+    }
+    const data = await response.json();
+    res.json({ success: true, offerings: data });
+  } catch (error) {
+    console.error('Error fetching RevenueCat offerings:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// NEW API ROUTES FOR ONE-FREE-SCAN FLOW
+
+// GET /api/entitlement - Get entitlement status for device
+app.get('/api/entitlement', async (req, res) => {
+  try {
+    const entitlement = await getEntitlementByDevice(req.deviceId);
+    res.json(entitlement);
+  } catch (error) {
+    console.error('Error getting entitlement:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/scan - Perform scan with gating logic
+app.post('/api/scan', upload.single('image'), async (req, res) => {
+  try {
+    // Check if device can perform scan
+    const { canScan, reason } = await canPerformScan(req.deviceId);
+    
+    if (!canScan) {
+      return res.status(402).json({ 
+        requirePaywall: true, 
+        reason: reason || 'limit_exceeded' 
+      });
+    }
+    
+    // If this is a free scan (not premium), increment usage
+    const entitlement = await getEntitlementByDevice(req.deviceId);
+    if (!entitlement.active) {
+      await incrementScanUsage(req.deviceId);
+    }
+    
+    // Perform the actual scan
+    await doScan(req, res);
+    
+  } catch (error) {
+    console.error('Error in scan endpoint:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/checkout - Create Stripe checkout session
+app.post('/api/checkout', async (req, res) => {
+  try {
+    // Validate request body
+    const schema = z.object({
+      plan: z.enum(['monthly', 'annual'])
+    });
+    
+    const { plan } = schema.parse(req.body);
+    
+    // Get price ID from environment
+    const priceId = plan === 'annual' 
+      ? process.env.STRIPE_PRICE_ANNUAL_ID 
+      : process.env.STRIPE_PRICE_MONTHLY_ID;
+    
+    if (!priceId) {
+      return res.status(400).json({ error: 'Price ID not configured for plan' });
+    }
+    
+    // Create Stripe checkout session
+    const session = await stripe.checkout.sessions.create({
+      mode: 'subscription',
+      line_items: [{ price: priceId, quantity: 1 }],
+      client_reference_id: req.deviceId,
+      success_url: `${process.env.PUBLIC_BASE_URL}/thank-you`,
+      cancel_url: `${process.env.PUBLIC_BASE_URL}/pricing`,
+      allow_promotion_codes: true,
+      metadata: {
+        deviceId: req.deviceId
+      }
+    });
+    
+    res.json({ url: session.url });
+    
+  } catch (error) {
+    console.error('Error creating checkout session:', error);
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: 'Invalid request body', details: error.errors });
+    }
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Refactored scan logic
+async function doScan(req, res) {
   try {
     if (!req.file) {
       return res.status(400).json({ 
@@ -533,7 +780,7 @@ app.post('/api/analyze', upload.single('image'), async (req, res) => {
     }
 
     // Log para verificar ejecución real de AI
-    console.log("✅ Prompt sent to OpenAI from /api/analyze");
+    console.log("✅ Prompt sent to OpenAI from /api/scan");
 
     // Convertir buffer a base64
     const base64Image = req.file.buffer.toString('base64');
@@ -577,34 +824,7 @@ app.post('/api/analyze', upload.single('image'), async (req, res) => {
       message: error.message || 'Failed to analyze the image'
     });
   }
-});
-
-// RevenueCat Offerings endpoint
-app.get('/api/revenuecat/offerings', async (req, res) => {
-  try {
-    const apiKey = process.env.REVENUECAT_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ error: 'RevenueCat API key not configured' });
-    }
-    // Llama a la API REST de RevenueCat para obtener los offerings
-    const response = await fetch('https://api.revenuecat.com/v1/offerings', {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Accept': 'application/json',
-      },
-    });
-    if (!response.ok) {
-      const errorText = await response.text();
-      return res.status(response.status).json({ error: 'RevenueCat API error', details: errorText });
-    }
-    const data = await response.json();
-    res.json({ success: true, offerings: data });
-  } catch (error) {
-    console.error('Error fetching RevenueCat offerings:', error);
-    res.status(500).json({ error: 'Internal server error', message: error.message });
-  }
-});
+}
 
 // Error handling middleware
 app.use((error, req, res, next) => {
@@ -643,6 +863,10 @@ app.listen(PORT, () => {
   // Log configuration status
   console.log(`🌐 WEB_URL: ${process.env.WEB_URL || 'NOT_SET'}`);
   console.log(`🔒 ALLOWED_ORIGINS: ${process.env.ALLOWED_ORIGINS || 'NOT_SET'}`);
+  
+  // Log CORS and NODE_ENV configuration
+  console.log('[server] NODE_ENV:', process.env.NODE_ENV);
+  console.log('[server] CORS_ALLOWED_ORIGINS:', allowed);
   
   // Log Lemon Squeezy configuration status
   try {

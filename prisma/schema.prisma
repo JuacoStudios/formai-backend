@@ -38,7 +38,7 @@ model Subscription {
 
 model UsageCounter {
   id          String    @id @default(uuid())
-  deviceId    String
+  deviceId    String    @unique
   device      Device    @relation(fields: [deviceId], references: [id])
   scansUsed   Int       @default(0)
   lastResetAt DateTime?

@@ -1,11 +1,11 @@
-{
+﻿{
   "name": "backend",
   "version": "1.0.0",
   "description": "Backend API for gym equipment analysis with Lemon Squeezy integration",
-  "main": "server.js",
+  "main": "dist/server.js",
   "scripts": {
-    "build": "echo 'No build step needed for JavaScript'",
-    "start": "node server.js",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
     "dev": "nodemon server.js",
     "test": "echo \"Error: no test specified\" && exit 1",
     "prisma:generate": "prisma generate",
@@ -38,7 +38,9 @@
     "zod": "^3.23.0"
   },
   "devDependencies": {
-    "nodemon": "^3.0.2"
+    "nodemon": "^3.0.2",
+    "typescript": "^5.5.3",
+    "@types/node": "^20.14.10"
   },
   "engines": {
     "node": ">=18.0.0"

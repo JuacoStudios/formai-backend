@@ -22,6 +22,7 @@ const PRICE_MONTHLY = process.env.STRIPE_PRICE_ID_MONTHLY!;
 const PRICE_ANNUAL = process.env.STRIPE_PRICE_ID_ANNUAL || undefined;
 const WEB_URL = process.env.WEB_URL!;
 
+
 // Trust proxy for secure cookies behind Render/NGINX
 app.set('trust proxy', 1);
 
@@ -174,6 +175,41 @@ app.post("/webhooks/stripe", express.raw({ type: "application/json" }), async (r
         break;
       }
       
+      case "invoice.payment_failed": {
+        const invoice = event.data.object;
+        const subscriptionId = invoice.subscription;
+        
+        if (subscriptionId) {
+          // Mark subscription as past_due
+          await prisma.subscription.updateMany({
+            where: { providerSubscriptionId: subscriptionId },
+            data: { status: 'past_due' }
+          });
+          
+          console.log(`✅ Marked subscription ${subscriptionId} as past_due due to payment failure`);
+        }
+        break;
+      }
+      
+      case "invoice.paid": {
+        const invoice = event.data.object;
+        const subscriptionId = invoice.subscription;
+        
+        if (subscriptionId) {
+          // Reactivate subscription if it was past_due
+          await prisma.subscription.updateMany({
+            where: { 
+              providerSubscriptionId: subscriptionId,
+              status: 'past_due'
+            },
+            data: { status: 'active' }
+          });
+          
+          console.log(`✅ Reactivated subscription ${subscriptionId} after successful payment`);
+        }
+        break;
+      }
+      
       default:
         console.log(`ℹ️ Unhandled Stripe event: ${event.type}`);
         break;
@@ -300,58 +336,6 @@ app.post('/api/debug/echo', (req, res) => {
 });
 
 // STRIPE: Create Stripe Checkout for subscriptions
-app.post("/api/create-checkout-session", async (req, res) => {
-  try {
-    const { priceId, customerEmail, userId, successUrl, cancelUrl, promotionCode } = req.body || {};
-    
-    // Log all incoming data for debugging
-    console.log('💳 Stripe checkout request:', { priceId, customerEmail, userId, successUrl, cancelUrl, promotionCode });
-    
-    if (!priceId || !customerEmail || !userId || !successUrl || !cancelUrl) {
-      console.error('❌ Missing required fields:', { priceId: !!priceId, customerEmail: !!customerEmail, userId: !!userId, successUrl: !!successUrl, cancelUrl: !!cancelUrl });
-      return res.status(400).json({ error: "Missing required fields" });
-    }
-    
-    // Validate price ID format
-    if (!priceId?.startsWith('price_')) {
-      console.error('❌ Invalid price ID format:', priceId);
-      return res.status(400).json({ error: 'INVALID_PRICE_ID', message: 'Price ID must start with "price_"' });
-    }
-    
-    console.log('💳 Creating Stripe checkout for priceId:', priceId, 'userId:', userId, promotionCode ? `with promotion code: ${promotionCode}` : '');
-    
-    const params: any = {
-      mode: "subscription",
-      line_items: [{ price: String(priceId), quantity: 1 }],
-      automatic_tax: { enabled: false },
-      ui_mode: 'hosted',
-      client_reference_id: userId,
-      customer_email: customerEmail,
-      success_url: successUrl,
-      cancel_url: cancelUrl,
-      allow_promotion_codes: true,
-      // Ensure the subscription carries userId for later webhook correlation
-      subscription_data: {
-        metadata: { userId, email: customerEmail },
-      },
-      metadata: { userId, email: customerEmail },
-    };
-    
-    // Add promotion code if provided
-    if (promotionCode) {
-      params.discounts = [{ promotion_code: promotionCode }];
-      console.log('🎫 Applying promotion code:', promotionCode);
-    }
-    
-    const session = await stripe.checkout.sessions.create(params);
-    
-    console.log('✅ Stripe checkout session created:', session.id, 'for userId:', userId);
-    return res.json({ id: session.id, url: session.url });
-  } catch (err) {
-    console.error("❌ Stripe create-checkout-session error:", err?.message || err);
-    return res.status(500).json({ error: err.message || "Stripe session creation failed" });
-  }
-});
 
 // STRIPE: Info route to expose configured price IDs (safe, no secrets)
 app.get("/api/stripe/prices", (_req, res) => {
@@ -368,7 +352,8 @@ app.get("/api/stripe/diagnostics", async (req, res) => {
       STRIPE_SECRET_KEY: !!process.env.STRIPE_SECRET_KEY,
       STRIPE_WEBHOOK_SECRET: !!process.env.STRIPE_WEBHOOK_SECRET,
       STRIPE_PRICE_ID_MONTHLY: !!process.env.STRIPE_PRICE_ID_MONTHLY,
-      STRIPE_PRICE_ID_ANNUAL: !!process.env.STRIPE_PRICE_ID_ANNUAL
+      STRIPE_PRICE_ID_ANNUAL: !!process.env.STRIPE_PRICE_ID_ANNUAL,
+      WEB_URL: !!process.env.WEB_URL
     }
   };
   
@@ -480,85 +465,7 @@ app.get('/api/stripe/products', async (req, res) => {
   }
 });
 
-// POST /api/checkout  body: { plan: 'monthly' | 'annual' }
-app.post('/api/checkout', async (req, res) => {
-  try {
-    const plan = (req.body?.plan === 'annual') ? 'annual' : 'monthly';
-    const priceId = plan === 'annual'
-      ? process.env.STRIPE_ANNUAL_PRICE_ID
-      : process.env.STRIPE_MONTHLY_PRICE_ID;
 
-    if (!priceId) {
-      return res.status(400).json({ error: 'Missing priceId' });
-    }
-
-    const session = await stripe.checkout.sessions.create({
-      mode: 'subscription',                       // use 'payment' for one-time
-      line_items: [{ price: priceId, quantity: 1 }],
-      ui_mode: 'hosted',
-      success_url: `${process.env.WEB_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.WEB_URL}/pricing?canceled=1`,
-    });
-
-    return res.json({ id: session.id, url: session.url });
-  } catch (e) {
-    console.error('[checkout] error:', e);
-    return res.status(500).json({ error: e?.message || 'checkout_failed' });
-  }
-});
-
-// Lemon Squeezy create checkout endpoint
-app.post('/api/create-checkout', async (req, res) => {
-  try {
-    console.log('📝 Received checkout request body:', req.body);
-    
-    // Read body with tolerance for different keys
-    const variantId = 
-      req.body?.variantId ?? 
-      req.body?.variant_id ?? 
-      req.body?.variant ?? 
-      req.body?.id;
-    
-    if (!variantId) {
-      console.error('❌ Missing variantId in request body:', req.body);
-      return res.status(400).json({ 
-        success: false, 
-        error: 'variantId is required',
-        received: req.body 
-      });
-    }
-
-    console.log('✅ Creating Stripe checkout for variantId:', variantId);
-    
-    const priceId = variantId === 'monthly' ? process.env.STRIPE_PRICE_ID_MONTHLY : process.env.STRIPE_PRICE_ID_ANNUAL;
-    
-    const session = await stripe.checkout.sessions.create({
-      mode: 'subscription',
-      line_items: [{
-        price: priceId,
-        quantity: 1,
-      }],
-      success_url: req.body.redirectUrl || `${process.env.FRONTEND_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: req.body.redirectUrl || `${process.env.FRONTEND_URL}/cancel`,
-      customer_email: req.body.customerEmail,
-      client_reference_id: req.body.userId || 'unknown',
-    });
-    
-    const checkoutUrl = session.url;
-    
-    res.json({ 
-      success: true, 
-      checkoutUrl 
-    });
-  } catch (error) {
-    console.error('❌ Error creating checkout:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to create checkout',
-      details: error.message 
-    });
-  }
-});
 
 
 
@@ -720,7 +627,7 @@ app.post('/api/scan', upload.single('image'), async (req, res) => {
   }
 });
 
-// POST /api/checkout - Create Stripe checkout session
+// POST /api/checkout - Create Stripe checkout session (CONSOLIDATED)
 app.post('/api/checkout', async (req, res) => {
   try {
     // Validate request body
@@ -730,13 +637,17 @@ app.post('/api/checkout', async (req, res) => {
     
     const { plan } = schema.parse(req.body);
     
-    // Get price ID from environment
+    // Get price ID from standardized environment variables
     const priceId = plan === 'annual' 
-      ? process.env.STRIPE_PRICE_ANNUAL_ID 
-      : process.env.STRIPE_PRICE_MONTHLY_ID;
+      ? process.env.STRIPE_PRICE_ID_ANNUAL 
+      : process.env.STRIPE_PRICE_ID_MONTHLY;
     
     if (!priceId) {
-      return res.status(400).json({ error: 'Price ID not configured for plan' });
+      return res.status(400).json({ 
+        error: 'Price ID not configured for plan',
+        plan,
+        expectedEnv: plan === 'annual' ? 'STRIPE_PRICE_ID_ANNUAL' : 'STRIPE_PRICE_ID_MONTHLY'
+      });
     }
     
     // Create Stripe checkout session
@@ -744,14 +655,16 @@ app.post('/api/checkout', async (req, res) => {
       mode: 'subscription',
       line_items: [{ price: priceId, quantity: 1 }],
       client_reference_id: req.deviceId,
-      success_url: `${process.env.PUBLIC_BASE_URL}/thank-you`,
-      cancel_url: `${process.env.PUBLIC_BASE_URL}/pricing`,
+      success_url: `${process.env.WEB_URL}/thank-you?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.WEB_URL}/pricing?canceled=1`,
       allow_promotion_codes: true,
       metadata: {
-        deviceId: req.deviceId
+        deviceId: req.deviceId,
+        plan: plan
       }
     });
     
+    console.log(`✅ Created checkout session ${session.id} for device ${req.deviceId}, plan: ${plan}`);
     res.json({ url: session.url });
     
   } catch (error) {
@@ -868,19 +781,19 @@ app.listen(PORT, () => {
   console.log("💳 Stripe config →",
     "SECRET:", !!process.env.STRIPE_SECRET_KEY,
     "WEBHOOK:", !!process.env.STRIPE_WEBHOOK_SECRET,
-    "MONTHLY:", !!process.env.STRIPE_MONTHLY_PRICE_ID,
-    "ANNUAL:", !!process.env.STRIPE_ANNUAL_PRICE_ID
+    "MONTHLY:", !!process.env.STRIPE_PRICE_ID_MONTHLY,
+    "ANNUAL:", !!process.env.STRIPE_PRICE_ID_ANNUAL
   );
   
   // Checkout endpoint status
   console.log('[checkout] ready', {
     WEB_URL: process.env.WEB_URL,
-    MONTHLY: !!process.env.STRIPE_MONTHLY_PRICE_ID,
-    ANNUAL: !!process.env.STRIPE_ANNUAL_PRICE_ID,
+    MONTHLY: !!process.env.STRIPE_PRICE_ID_MONTHLY,
+    ANNUAL: !!process.env.STRIPE_PRICE_ID_ANNUAL,
   });
   
   // Log mounted endpoints
-  console.log("✅ Mounted endpoints: /api/checkout, /api/create-checkout-session, /api/stripe/products");
+  console.log("✅ Mounted endpoints: /api/checkout, /api/stripe/products, /api/stripe/diagnostics");
 });
 
 module.exports = app; 

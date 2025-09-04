@@ -4,9 +4,9 @@
   "description": "Backend API for gym equipment analysis with Lemon Squeezy integration",
   "main": "dist/server.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "rimraf dist && tsc -p tsconfig.json",
     "start": "node dist/server.js",
-    "dev": "nodemon server.js",
+    "dev": "tsx src/server.ts",
     "test": "echo \"Error: no test specified\" && exit 1",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",
@@ -38,7 +38,10 @@
     "zod": "^3.23.0"
   },
   "devDependencies": {
-    "nodemon": "^3.0.2"
+    "nodemon": "^3.0.2",
+    "rimraf": "^5.0.5",
+    "tsx": "^4.7.0",
+    "@types/node": "^22.0.0"
   },
   "engines": {
     "node": ">=18.0.0"

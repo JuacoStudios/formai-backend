@@ -8,7 +8,6 @@ const { v4: uuidv4 } = require('uuid');
 const { z } = require('zod');
 const { OpenAI } = require('openai');
 const Stripe = require('stripe'); // STRIPE: Add Stripe SDK
-// LemonSqueezy integration removed - using Stripe only
 const { 
   getEntitlementByDevice, 
   canPerformScan, 
@@ -182,33 +181,6 @@ app.post("/webhooks/stripe", express.raw({ type: "application/json" }), async (r
   res.status(200).send('ok');
 });
 
-// Lemon Squeezy webhook endpoint (must use raw body) - MUST be before JSON parsing
-app.post('/webhooks/lemonsqueezy', express.raw({ type: '*/*' }), async (req, res) => {
-  try {
-    const signature = req.headers['x-signature'];
-    
-    if (!signature) {
-      console.error('Missing X-Signature header');
-      return res.status(400).send('Missing signature');
-    }
-
-    // TODO(stripe-only): LemonSqueezy webhook signature verification removed
-    // Stripe webhooks are handled separately below
-
-    // Parse the raw body
-    const payload = JSON.parse(req.body.toString('utf8'));
-    
-    // TODO(stripe-only): LemonSqueezy webhook processing removed
-    // Stripe webhooks are handled separately below
-    
-    // Always return 200 to avoid retries
-    res.status(200).send('ok');
-  } catch (error) {
-    console.error('Error processing webhook:', error);
-    // Still return 200 to avoid retries, but log the error
-    res.status(200).send('ok');
-  }
-});
 
 // CORS allowlist with credentials
 const allowed = (process.env.CORS_ALLOWED_ORIGINS || '')
@@ -442,7 +414,6 @@ app.get("/api/stripe/diagnostics", async (req, res) => {
 // Lemon Squeezy products endpoint
 app.get('/api/products', async (req, res) => {
   try {
-    // TODO(stripe-only): LemonSqueezy getProducts removed, using static Stripe data
     const products = {
       monthly: {
         id: process.env.STRIPE_PRICE_ID_MONTHLY,
@@ -554,7 +525,6 @@ app.post('/api/create-checkout', async (req, res) => {
 
     console.log('✅ Creating Stripe checkout for variantId:', variantId);
     
-    // TODO(stripe-only): LemonSqueezy createCheckout replaced with Stripe
     const priceId = variantId === 'monthly' ? process.env.STRIPE_PRICE_ID_MONTHLY : process.env.STRIPE_PRICE_ID_ANNUAL;
     
     const session = await stripe.checkout.sessions.create({
@@ -887,7 +857,6 @@ app.listen(PORT, () => {
   console.log('[server] NODE_ENV:', process.env.NODE_ENV);
   console.log('[server] CORS_ALLOWED_ORIGINS:', allowed);
   
-  // TODO(stripe-only): LemonSqueezy config validation removed
   console.log(`💳 Stripe config → PRICE_MONTHLY: ${process.env.STRIPE_PRICE_ID_MONTHLY ? '✔' : '✖'}, PRICE_ANNUAL: ${process.env.STRIPE_PRICE_ID_ANNUAL ? '✔' : '✖'}, WEBHOOK_SECRET: ${!!process.env.STRIPE_WEBHOOK_SECRET ? '✔' : '✖'}`);
   
   // STRIPE: Log Stripe configuration status

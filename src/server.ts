@@ -17,6 +17,11 @@ const {
 const app = express();
 const PORT = process.env.PORT || 8080;
 
+// Environment constants
+const PRICE_MONTHLY = process.env.STRIPE_PRICE_ID_MONTHLY!;
+const PRICE_ANNUAL = process.env.STRIPE_PRICE_ID_ANNUAL || undefined;
+const WEB_URL = process.env.WEB_URL!;
+
 // Trust proxy for secure cookies behind Render/NGINX
 app.set('trust proxy', 1);
 
@@ -315,7 +320,7 @@ app.post("/api/create-checkout-session", async (req, res) => {
     
     console.log('💳 Creating Stripe checkout for priceId:', priceId, 'userId:', userId, promotionCode ? `with promotion code: ${promotionCode}` : '');
     
-    const params = {
+    const params: any = {
       mode: "subscription",
       line_items: [{ price: String(priceId), quantity: 1 }],
       automatic_tax: { enabled: false },
@@ -358,7 +363,7 @@ app.get("/api/stripe/prices", (_req, res) => {
 
 // STRIPE: Diagnostics endpoint to verify Stripe configuration and connectivity
 app.get("/api/stripe/diagnostics", async (req, res) => {
-  const report = {
+  const report: any = {
     env: {
       STRIPE_SECRET_KEY: !!process.env.STRIPE_SECRET_KEY,
       STRIPE_WEBHOOK_SECRET: !!process.env.STRIPE_WEBHOOK_SECRET,

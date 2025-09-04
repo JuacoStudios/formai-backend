@@ -8,13 +8,7 @@ const { v4: uuidv4 } = require('uuid');
 const { z } = require('zod');
 const { OpenAI } = require('openai');
 const Stripe = require('stripe'); // STRIPE: Add Stripe SDK
-const { 
-  getProducts, 
-  createCheckout, 
-  verifyWebhookSignature, 
-  processWebhookEvent,
-  validateConfig 
-} = require('../lemonsqueezy');
+// LemonSqueezy integration removed - using Stripe only
 const { 
   getEntitlementByDevice, 
   canPerformScan, 
@@ -198,17 +192,14 @@ app.post('/webhooks/lemonsqueezy', express.raw({ type: '*/*' }), async (req, res
       return res.status(400).send('Missing signature');
     }
 
-    // Verify webhook signature
-    if (!verifyWebhookSignature(req.body, signature)) {
-      console.error('Invalid webhook signature');
-      return res.status(400).send('Invalid signature');
-    }
+    // TODO(stripe-only): LemonSqueezy webhook signature verification removed
+    // Stripe webhooks are handled separately below
 
     // Parse the raw body
     const payload = JSON.parse(req.body.toString('utf8'));
     
-    // Process the webhook event
-    processWebhookEvent(payload);
+    // TODO(stripe-only): LemonSqueezy webhook processing removed
+    // Stripe webhooks are handled separately below
     
     // Always return 200 to avoid retries
     res.status(200).send('ok');
@@ -451,7 +442,19 @@ app.get("/api/stripe/diagnostics", async (req, res) => {
 // Lemon Squeezy products endpoint
 app.get('/api/products', async (req, res) => {
   try {
-    const products = await getProducts();
+    // TODO(stripe-only): LemonSqueezy getProducts removed, using static Stripe data
+    const products = {
+      monthly: {
+        id: process.env.STRIPE_PRICE_ID_MONTHLY,
+        name: 'Monthly Plan',
+        price: 9.99
+      },
+      annual: {
+        id: process.env.STRIPE_PRICE_ID_ANNUAL,
+        name: 'Annual Plan', 
+        price: 99.99
+      }
+    };
     res.json({ 
       success: true, 
       data: products 
@@ -549,8 +552,24 @@ app.post('/api/create-checkout', async (req, res) => {
       });
     }
 
-    console.log('✅ Creating checkout for variantId:', variantId);
-    const checkoutUrl = await createCheckout(variantId, req.body.customerEmail, req.body.redirectUrl);
+    console.log('✅ Creating Stripe checkout for variantId:', variantId);
+    
+    // TODO(stripe-only): LemonSqueezy createCheckout replaced with Stripe
+    const priceId = variantId === 'monthly' ? process.env.STRIPE_PRICE_ID_MONTHLY : process.env.STRIPE_PRICE_ID_ANNUAL;
+    
+    const session = await stripe.checkout.sessions.create({
+      mode: 'subscription',
+      line_items: [{
+        price: priceId,
+        quantity: 1,
+      }],
+      success_url: req.body.redirectUrl || `${process.env.FRONTEND_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: req.body.redirectUrl || `${process.env.FRONTEND_URL}/cancel`,
+      customer_email: req.body.customerEmail,
+      client_reference_id: req.body.userId || 'unknown',
+    });
+    
+    const checkoutUrl = session.url;
     
     res.json({ 
       success: true, 
@@ -868,14 +887,8 @@ app.listen(PORT, () => {
   console.log('[server] NODE_ENV:', process.env.NODE_ENV);
   console.log('[server] CORS_ALLOWED_ORIGINS:', allowed);
   
-  // Log Lemon Squeezy configuration status
-  try {
-    validateConfig();
-    console.log(`🍋 Lemon Squeezy config → STORE_ID: ✔, API_KEY: ✔, WEBHOOK_SECRET: ✔`);
-  } catch (error) {
-    console.log(`🍋 Lemon Squeezy config → STORE_ID: ${process.env.LEMONSQUEEZY_STORE_ID ? '✔' : '✖'}, API_KEY: ${!!process.env.LEMONSQUEEZY_API_KEY ? '✔' : '✖'}, WEBHOOK_SECRET: ${!!process.env.LEMONSQUEEZY_WEBHOOK_SECRET ? '✔' : '✖'}`);
-    console.log(`⚠️  Lemon Squeezy not fully configured: ${error.message}`);
-  }
+  // TODO(stripe-only): LemonSqueezy config validation removed
+  console.log(`💳 Stripe config → PRICE_MONTHLY: ${process.env.STRIPE_PRICE_ID_MONTHLY ? '✔' : '✖'}, PRICE_ANNUAL: ${process.env.STRIPE_PRICE_ID_ANNUAL ? '✔' : '✖'}, WEBHOOK_SECRET: ${!!process.env.STRIPE_WEBHOOK_SECRET ? '✔' : '✖'}`);
   
   // STRIPE: Log Stripe configuration status
   console.log("💳 Stripe config →",

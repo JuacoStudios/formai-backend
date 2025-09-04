@@ -116,3 +116,4 @@ export async function canPerformScan(deviceId: string): Promise<{ canScan: boole
     reason: 'limit_exceeded' 
   };
 }
+

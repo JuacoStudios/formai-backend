@@ -223,27 +223,58 @@ app.post("/webhooks/stripe", express.raw({ type: "application/json" }), async (r
 });
 
 
-// CORS allowlist with credentials
-const allowed = (process.env.CORS_ALLOWED_ORIGINS || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
+// --- CORS bootstrap additions ---
+const parseOrigins = (raw?: string) =>
+  (raw ? raw.split(",") : [])
+    .map(s => s.trim())
+    .filter(Boolean);
 
+const defaultWhitelist = [
+  "https://form-ai-websitee.vercel.app", // exact production origin (NO trailing slash)
+  "http://localhost:3000",
+];
+
+const CORS_WHITELIST = (() => {
+  const envList = parseOrigins(process.env.CORS_ALLOWED_ORIGINS);
+  const list = envList.length ? envList : defaultWhitelist;
+  if (!envList.length) {
+    console.warn("WARN: CORS_ALLOWED_ORIGINS is empty or missing. Using default whitelist:", defaultWhitelist);
+  }
+  console.info("CORS whitelist →", list);
+  return list;
+})();
+
+// Keep your existing corsOptions, or create if missing:
 const corsOptions = {
-  origin(origin, cb) {
-    // allow same-origin / server-to-server or tools without Origin
-    if (!origin) return cb(null, true);
-    if (allowed.includes(origin)) return cb(null, true);
-    return cb(new Error(`CORS: Origin not allowed → ${origin}`));
+  origin: (origin: string | undefined, cb: (err: Error | null, allow?: boolean) => void) => {
+    if (!origin) return cb(null, true); // allow curl/health/no-origin requests
+    if (CORS_WHITELIST.includes(origin)) return cb(null, true);
+    return cb(new Error(`Not allowed by CORS: ${origin}`));
   },
   credentials: true,
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
 };
 
-app.use((req, res, next) => { res.header('Vary', 'Origin'); next(); });
+// Mount early, before routes and error handlers
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
+
+// Post-cors shim: ensure consistent headers & OPTIONS 204
+app.use((req, res, next) => {
+  const origin = req.headers.origin as string | undefined;
+  if (origin && CORS_WHITELIST.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
+// Make sure this exists either via cors() or explicitly:
+app.options("*", cors(corsOptions));
 
 // Cookie parser and JSON body parser
 app.use(cookieParser());
@@ -305,6 +336,21 @@ const upload = multer({
     }
   }
 });
+
+// OPTIONAL: Debug endpoint (enable in dev or protect with key)
+if (process.env.NODE_ENV !== "production" || process.env.CORS_DEBUG_KEY) {
+  app.get("/api/debug/cors", (req, res) => {
+    const requestOrigin = req.headers.origin as string | undefined;
+    const isAllowed = requestOrigin ? CORS_WHITELIST.includes(requestOrigin) : true;
+    res.json({
+      allowedOrigins: CORS_WHITELIST,
+      requestOrigin: requestOrigin || null,
+      isAllowed,
+      nodeEnv: process.env.NODE_ENV || null,
+      hasDebugKey: Boolean(process.env.CORS_DEBUG_KEY),
+    });
+  });
+}
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
@@ -769,11 +815,11 @@ app.listen(PORT, () => {
   
   // Log configuration status
   console.log(`🌐 WEB_URL: ${process.env.WEB_URL || 'NOT_SET'}`);
-  console.log(`🔒 ALLOWED_ORIGINS: ${process.env.ALLOWED_ORIGINS || 'NOT_SET'}`);
+  console.log(`🔒 CORS_ALLOWED_ORIGINS: ${process.env.CORS_ALLOWED_ORIGINS || 'NOT_SET'}`);
+  console.log(`🔒 CORS_WHITELIST: ${CORS_WHITELIST.join(', ')}`);
   
   // Log CORS and NODE_ENV configuration
   console.log('[server] NODE_ENV:', process.env.NODE_ENV);
-  console.log('[server] CORS_ALLOWED_ORIGINS:', allowed);
   
   console.log(`💳 Stripe config → PRICE_MONTHLY: ${process.env.STRIPE_PRICE_ID_MONTHLY ? '✔' : '✖'}, PRICE_ANNUAL: ${process.env.STRIPE_PRICE_ID_ANNUAL ? '✔' : '✖'}, WEBHOOK_SECRET: ${!!process.env.STRIPE_WEBHOOK_SECRET ? '✔' : '✖'}`);
   

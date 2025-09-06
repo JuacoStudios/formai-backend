@@ -70,6 +70,36 @@ npm start
 - `PORT`: Server port (default: 8080)
 - `REVENUECAT_API_KEY`: RevenueCat API key (legacy)
 
+## CORS Configuration
+
+The backend includes comprehensive CORS support for frontend integration:
+
+### Required Environment Variables
+- `CORS_ALLOWED_ORIGINS`: Comma-separated list of allowed origins (e.g., `https://your-app.vercel.app,http://localhost:3000`)
+
+### Default Whitelist
+If `CORS_ALLOWED_ORIGINS` is not set, the server uses:
+- `https://form-ai-websitee.vercel.app` (production)
+- `http://localhost:3000` (development)
+
+### CORS Headers
+The server automatically sets:
+- `Access-Control-Allow-Origin`: Dynamic based on whitelist
+- `Access-Control-Allow-Credentials`: `true`
+- `Access-Control-Allow-Methods`: `GET, POST, OPTIONS`
+- `Access-Control-Allow-Headers`: `Content-Type, Authorization`
+- `Vary`: `Origin`
+
+### Debug Endpoint
+In development or with `CORS_DEBUG_KEY` set:
+- `GET /api/debug/cors` - Returns CORS configuration and request origin status
+
+### Setup Instructions
+1. Set `CORS_ALLOWED_ORIGINS` in Render Dashboard → Environment
+2. Must match exact Origin (no trailing slash)
+3. If using cookies-based auth: frontend must call `fetch(..., { credentials: "include" })`
+4. Server keeps `SameSite=None; Secure` for cross-site cookies
+
 ## Lemon Squeezy Setup
 
 For detailed Lemon Squeezy configuration and testing instructions, see [LEMON_SQUEEZY_SETUP.md](./LEMON_SQUEEZY_SETUP.md).

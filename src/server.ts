@@ -224,31 +224,27 @@ app.post("/webhooks/stripe", express.raw({ type: "application/json" }), async (r
 
 
 // --- CORS bootstrap additions ---
-const parseOrigins = (raw?: string) =>
-  (raw ? raw.split(",") : [])
-    .map(s => s.trim())
-    .filter(Boolean);
+const isAllowedOrigin = (origin?: string) => {
+  if (!origin) return true; // allow curl/health/no-origin
 
-const defaultWhitelist = [
-  "https://form-ai-websitee.vercel.app", // exact production origin (NO trailing slash)
-  "http://localhost:3000",
-];
+  // Production (exact)
+  if (origin === "https://form-ai-websitee.vercel.app") return true;
 
-const CORS_WHITELIST = (() => {
-  const envList = parseOrigins(process.env.CORS_ALLOWED_ORIGINS);
-  const list = envList.length ? envList : defaultWhitelist;
-  if (!envList.length) {
-    console.warn("WARN: CORS_ALLOWED_ORIGINS is empty or missing. Using default whitelist:", defaultWhitelist);
-  }
-  console.info("CORS whitelist →", list);
-  return list;
-})();
+  // Vercel previews of this project (two variants; keep both)
+  const previewOk =
+    /^https:\/\/form-ai-websitee-[a-z0-9-]+\.vercel\.app$/.test(origin) ||
+    /^https:\/\/form-ai-webstiee-[a-z0-9-]+\.vercel\.app$/.test(origin);
+  if (previewOk) return true;
 
-// Keep your existing corsOptions, or create if missing:
+  // Local development
+  if (origin === "http://localhost:3000") return true;
+
+  return false;
+};
+
 const corsOptions = {
   origin: (origin: string | undefined, cb: (err: Error | null, allow?: boolean) => void) => {
-    if (!origin) return cb(null, true); // allow curl/health/no-origin requests
-    if (CORS_WHITELIST.includes(origin)) return cb(null, true);
+    if (isAllowedOrigin(origin)) return cb(null, true);
     return cb(new Error(`Not allowed by CORS: ${origin}`));
   },
   credentials: true,
@@ -259,12 +255,10 @@ const corsOptions = {
 // Mount early, before routes and error handlers
 app.use(cors(corsOptions));
 
-// Post-cors shim: ensure consistent headers & OPTIONS 204
+// Post-CORS shim to ensure consistent headers + proper OPTIONS
 app.use((req, res, next) => {
-  const origin = req.headers.origin as string | undefined;
-  if (origin && CORS_WHITELIST.includes(origin)) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-  }
+  const o = req.headers.origin as string | undefined;
+  if (isAllowedOrigin(o)) res.setHeader("Access-Control-Allow-Origin", o!);
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Credentials", "true");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
@@ -273,7 +267,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// Make sure this exists either via cors() or explicitly:
 app.options("*", cors(corsOptions));
 
 // Cookie parser and JSON body parser
@@ -341,9 +334,9 @@ const upload = multer({
 if (process.env.NODE_ENV !== "production" || process.env.CORS_DEBUG_KEY) {
   app.get("/api/debug/cors", (req, res) => {
     const requestOrigin = req.headers.origin as string | undefined;
-    const isAllowed = requestOrigin ? CORS_WHITELIST.includes(requestOrigin) : true;
+    const isAllowed = isAllowedOrigin(requestOrigin);
     res.json({
-      allowedOrigins: CORS_WHITELIST,
+      allowedOrigins: ["https://form-ai-websitee.vercel.app", "http://localhost:3000", "Vercel previews"],
       requestOrigin: requestOrigin || null,
       isAllowed,
       nodeEnv: process.env.NODE_ENV || null,
@@ -816,7 +809,7 @@ app.listen(PORT, () => {
   // Log configuration status
   console.log(`🌐 WEB_URL: ${process.env.WEB_URL || 'NOT_SET'}`);
   console.log(`🔒 CORS_ALLOWED_ORIGINS: ${process.env.CORS_ALLOWED_ORIGINS || 'NOT_SET'}`);
-  console.log(`🔒 CORS_WHITELIST: ${CORS_WHITELIST.join(', ')}`);
+  console.log(`🔒 CORS: Production + Vercel previews + localhost allowed`);
   
   // Log CORS and NODE_ENV configuration
   console.log('[server] NODE_ENV:', process.env.NODE_ENV);

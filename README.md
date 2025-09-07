@@ -100,6 +100,29 @@ In development or with `CORS_DEBUG_KEY` set:
 3. If using cookies-based auth: frontend must call `fetch(..., { credentials: "include" })`
 4. Server keeps `SameSite=None; Secure` for cross-site cookies
 
+## CORS & Previews
+
+### Production Origin
+The production origin is fixed and must match exactly:
+- `https://form-ai-websitee.vercel.app`
+
+### Vercel Previews
+Previews are allowed only if they match these patterns:
+- `https://form-ai-websitee-*.vercel.app` (correct spelling)
+- `https://form-ai-webstiee-*.vercel.app` (misspelled variant)
+
+### Why No Global Wildcard
+We don't allow `*.vercel.app` globally for security reasons:
+- Prevents unauthorized access from other Vercel projects
+- Ensures only this specific project's previews are allowed
+- Maintains strict origin validation
+
+### Adding New Origins
+If the project name changes, update the `isAllowedOrigin` helper in `server.ts`:
+1. Add the new production origin to the exact match
+2. Add new preview patterns if needed
+3. Test with the verification commands below
+
 ## Lemon Squeezy Setup
 
 For detailed Lemon Squeezy configuration and testing instructions, see [LEMON_SQUEEZY_SETUP.md](./LEMON_SQUEEZY_SETUP.md).

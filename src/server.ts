@@ -283,8 +283,8 @@ app.options("*", cors(corsOptions));
 
 // Cookie parser and JSON body parser
 app.use(cookieParser());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '8mb' }));
+app.use(express.urlencoded({ extended: true, limit: '8mb' }));
 
 // Security hardening
 app.disable('x-powered-by');
@@ -783,6 +783,13 @@ async function doScan(req, res) {
     });
   }
 }
+
+// Import and mount analyze route
+const analyzeRouter = require('./routes/analyze');
+app.use('/api', analyzeRouter);
+
+// Log mounted endpoints
+console.info('Mounted endpoint: /api/analyze');
 
 // Error handling middleware
 app.use((error, req, res, next) => {

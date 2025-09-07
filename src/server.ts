@@ -26,6 +26,18 @@ const WEB_URL = process.env.WEB_URL!;
 // Trust proxy for secure cookies behind Render/NGINX
 app.set('trust proxy', 1);
 
+// Collapse accidental "/api/api/*" -> "/api/*" to avoid 404s if the client double-prefixes.
+app.use((req, _res, next) => {
+  if (req.url.startsWith('/api/api/')) {
+    const fixed = req.url.replace(/^\/api\/api\//, '/api/');
+    console.warn('[ROUTE NORMALIZER] Collapsing', req.url, '->', fixed);
+    req.url = fixed;
+  }
+  // Optional: collapse any double slashes except the protocol prefix
+  req.url = req.url.replace(/\/{2,}/g, '/');
+  next();
+});
+
 // STRIPE: Initialize Stripe with environment variable
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { 
   apiVersion: "2024-06-20" 

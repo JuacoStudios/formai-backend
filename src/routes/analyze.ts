@@ -1,12 +1,12 @@
-import { Router, type Request, type Response } from 'express';
-import multer from 'multer';
+const { Router } = require('express');
+const multerLib = require('multer');
 
 const router = Router();
-const upload = multer({ storage: multer.memoryStorage() });
+const uploadMiddleware = multerLib({ storage: multerLib.memoryStorage() });
 
 // POST /analyze - Alias for /api/scan with same logic
-router.post('/analyze', upload.single('image'), async (req: Request, res: Response) => {
-  const file = req.file as Express.Multer.File | undefined; // provisto por @types/multer
+router.post('/analyze', uploadMiddleware.single('image'), async (req, res) => {
+  const file = req.file;
   const base64 = typeof req.body?.image === 'string' ? req.body.image : undefined;
 
   if (!file && !base64) {
@@ -16,7 +16,7 @@ router.post('/analyze', upload.single('image'), async (req: Request, res: Respon
   // Check if device can perform scan (same logic as /api/scan)
   const { getEntitlementByDevice, canPerformScan, incrementScanUsage } = require('../lib/entitlement');
   
-  const deviceId = (req as any).deviceId;
+  const deviceId = req.deviceId;
   if (!deviceId) {
     return res.status(400).json({ error: 'Device ID required' });
   }
@@ -40,4 +40,4 @@ router.post('/analyze', upload.single('image'), async (req: Request, res: Respon
   return res.json({ ok: true });
 });
 
-export default router;
+module.exports = router;

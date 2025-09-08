@@ -1,6 +1,7 @@
 require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
+import express from 'express';
+import cors from 'cors';
+import routesMaybe from './routes'; // default export expected
 const cookieParser = require('cookie-parser');
 const multer = require('multer');
 const path = require('path');
@@ -237,46 +238,25 @@ app.post("/webhooks/stripe", express.raw({ type: "application/json" }), async (r
 
 
 // --- CORS bootstrap additions ---
-// Allow Vercel previews for this project and local dev ports
 const allowlist = [
-  new RegExp('^https://form-ai-website[a-z0-9\-]*\.vercel\.app$', 'i'),
-  new RegExp('^http://localhost:(3000|5173)$', 'i'),
+  /^https:\/\/form-ai-website[a-z0-9\-]*\.vercel\.app$/i,
+  /^http:\/\/localhost:(3000|5173)$/
 ];
 
-const isAllowedOrigin = (origin?: string) => {
-  if (!origin) return true; // allow curl/health/no-origin
-  return allowlist.some((re) => re.test(origin));
-};
-
-const corsOptions = {
-  origin: (origin: string | undefined, cb: (err: Error | null, allow?: boolean) => void) => {
-    if (!origin) return cb(null, true);
-    const ok = allowlist.some((re) => re.test(origin));
+const corsOptions: cors.CorsOptions = {
+  origin(origin, cb) {
+    if (!origin) return cb(null, true); // curl/Postman
+    const ok = allowlist.some(re => re.test(origin));
     return cb(ok ? null : new Error('CORS: origin not allowed'), ok);
   },
   credentials: true,
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 };
 
 // Mount early, before routes and error handlers
 app.use(cors(corsOptions));
-
-// Post-CORS shim to ensure consistent headers + proper OPTIONS
-app.use((req, res, next) => {
-  const o = req.headers.origin as string | undefined;
-  if (isAllowedOrigin(o) && o) {
-    res.setHeader("Access-Control-Allow-Origin", o);
-  }
-  res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Credentials", "true");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  if (req.method === "OPTIONS") return res.sendStatus(204);
-  next();
-});
-
-app.options("*", cors(corsOptions));
+app.options('*', cors(corsOptions));
 
 // Cookie parser and JSON body parser
 app.use(cookieParser());
@@ -322,9 +302,15 @@ async function ensureDeviceId(req, res, next) {
 // Apply device ID middleware only to API routes
 app.use('/api', ensureDeviceId);
 
-// Import and mount API root router ONCE
-const apiRootRouter = require('./routes').default || require('./routes');
-app.use('/api', apiRootRouter);
+// Interop guard (before mounting) to fail loudly if the routes export isn't a Router
+const api: any = (routesMaybe as any)?.default ?? routesMaybe;
+if (typeof api?.use !== 'function') {
+  console.error('Invalid API router export. typeof =', typeof api, 'keys=', Object.keys(api || {}));
+  throw new Error('Routes export is not an Express Router');
+}
+
+// Mount once and keep a JSON 404 fallback
+app.use('/api', api);
 
 // Log mounted endpoints
 console.info('Mounted endpoint: /api (root)');
@@ -350,7 +336,7 @@ const upload = multer({
 if (process.env.NODE_ENV !== "production" || process.env.CORS_DEBUG_KEY) {
   app.get("/api/debug/cors", (req, res) => {
     const requestOrigin = req.headers.origin as string | undefined;
-    const isAllowed = isAllowedOrigin(requestOrigin);
+    const isAllowed = allowlist.some(re => re.test(requestOrigin || ''));
     res.json({
       allowedOrigins: ["https://form-ai-websitee.vercel.app", "http://localhost:3000", "Vercel previews"],
       requestOrigin: requestOrigin || null,
@@ -365,18 +351,9 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-// Health check endpoint
+// Health check endpoint (root level)
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
-});
-
-// New Lemon Squeezy health endpoint
-app.get('/api/health', (req, res) => {
-  res.json({ 
-    ok: true, 
-    ts: Date.now(),
-    origin: req.get('origin') || null
-  });
 });
 
 // Debug endpoint for body parsing verification
@@ -650,7 +627,7 @@ app.get('/api/revenuecat/offerings', async (req, res) => {
 // GET /api/entitlement - Get entitlement status for device
 app.get('/api/entitlement', async (req, res) => {
   try {
-    const entitlement = await getEntitlementByDevice(req.deviceId);
+    const entitlement = await getEntitlementByDevice((req as any).deviceId);
     res.json(entitlement);
   } catch (error: unknown) {
     console.error('Error getting entitlement:', error);
@@ -662,7 +639,7 @@ app.get('/api/entitlement', async (req, res) => {
 app.post('/api/scan', upload.single('image'), async (req, res) => {
   try {
     // Check if device can perform scan
-    const { canScan, reason } = await canPerformScan(req.deviceId);
+    const { canScan, reason } = await canPerformScan((req as any).deviceId);
     
     if (!canScan) {
       return res.status(402).json({ 
@@ -672,9 +649,9 @@ app.post('/api/scan', upload.single('image'), async (req, res) => {
     }
     
     // If this is a free scan (not premium), increment usage
-    const entitlement = await getEntitlementByDevice(req.deviceId);
+    const entitlement = await getEntitlementByDevice((req as any).deviceId);
     if (!entitlement.active) {
-      await incrementScanUsage(req.deviceId);
+      await incrementScanUsage((req as any).deviceId);
     }
     
     // Perform the actual scan
@@ -713,17 +690,17 @@ app.post('/api/checkout', async (req, res) => {
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
       line_items: [{ price: priceId, quantity: 1 }],
-      client_reference_id: req.deviceId,
+      client_reference_id: (req as any).deviceId,
       success_url: `${process.env.WEB_URL}/thank-you?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${process.env.WEB_URL}/pricing?canceled=1`,
       allow_promotion_codes: true,
       metadata: {
-        deviceId: req.deviceId,
+        deviceId: (req as any).deviceId,
         plan: plan
       }
     });
     
-    console.log(`✅ Created checkout session ${session.id} for device ${req.deviceId}, plan: ${plan}`);
+    console.log(`✅ Created checkout session ${session.id} for device ${(req as any).deviceId}, plan: ${plan}`);
     res.json({ url: session.url });
     
   } catch (error: unknown) {

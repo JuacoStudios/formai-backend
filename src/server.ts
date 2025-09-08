@@ -63,9 +63,10 @@ app.post("/webhooks/stripe", express.raw({ type: "application/json" }), async (r
       sig,
       process.env.STRIPE_WEBHOOK_SECRET
     );
-  } catch (err) {
-    console.error("❌ Webhook signature verification failed:", err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("❌ Webhook signature verification failed:", message);
+    return res.status(400).send(`Webhook Error: ${message}`);
   }
 
   // Idempotency check - if we've already processed this event, return 200
@@ -226,8 +227,9 @@ app.post("/webhooks/stripe", express.raw({ type: "application/json" }), async (r
         console.log(`ℹ️ Unhandled Stripe event: ${event.type}`);
         break;
     }
-  } catch (error) {
-    console.error(`❌ Error processing webhook event ${event.id}:`, error);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`❌ Error processing webhook event ${event.id}:`, message);
     // Still return 200 to avoid retries
   }
 
@@ -315,8 +317,9 @@ async function ensureDeviceId(req, res, next) {
       update: { lastSeen: new Date() },
       create: { id, lastSeen: new Date() }
     });
-  } catch (error) {
-    console.error('Error upserting device:', error);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('Error upserting device:', message);
     // Continue anyway - don't block the request
   }
   
@@ -453,9 +456,10 @@ app.get("/api/stripe/diagnostics", async (req, res) => {
     
     console.log('✅ Stripe diagnostics completed successfully');
     
-  } catch (e) {
-    console.error('❌ Stripe diagnostics error:', e.message);
-    report.error = e.message;
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    console.error('❌ Stripe diagnostics error:', message);
+    report.error = message;
   }
   
   res.json(report);
@@ -480,8 +484,9 @@ app.get('/api/products', async (req, res) => {
       success: true, 
       data: products 
     });
-  } catch (error) {
-    console.error('Error fetching products:', error);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('Error fetching products:', message);
     
     // Check if it's a missing price IDs error
     if (!process.env.STRIPE_PRICE_ID_MONTHLY || !process.env.STRIPE_PRICE_ID_ANNUAL) {
@@ -494,7 +499,7 @@ app.get('/api/products', async (req, res) => {
     
     res.status(500).json({ 
       success: false, 
-      error: error.message || 'Failed to fetch products' 
+      error: message || 'Failed to fetch products' 
     });
   }
 });
@@ -516,11 +521,12 @@ app.get('/api/stripe/products', async (req, res) => {
       monthly: monthlyId ? { id: monthlyId, active: true } : null,
       annual: annualId ? { id: annualId, active: true } : null
     });
-  } catch (error) {
-    console.error('Error in /api/stripe/products:', error);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('Error in /api/stripe/products:', message);
     res.status(500).json({ 
       error: "Failed to get Stripe products",
-      message: error.message 
+      message: message 
     });
   }
 });
@@ -564,8 +570,9 @@ app.get("/api/subscription/status", async (req, res) => {
       source: "stripe" 
     });
     
-  } catch (err) {
-    console.error("❌ Subscription status check error:", err?.message || err);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("❌ Subscription status check error:", message);
     return res.status(500).json({ 
       active: false, 
       plan: null, 
@@ -606,8 +613,9 @@ app.post("/api/subscription/refresh", async (req, res) => {
       source: "stripe" 
     });
     
-  } catch (err) {
-    console.error("❌ Subscription refresh error:", err?.message || err);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("❌ Subscription refresh error:", message);
     return res.status(500).json({ 
       active: false, 
       plan: null, 
@@ -640,9 +648,10 @@ app.get('/api/revenuecat/offerings', async (req, res) => {
     }
     const data = await response.json();
     res.json({ success: true, offerings: data });
-  } catch (error) {
-    console.error('Error fetching RevenueCat offerings:', error);
-    res.status(500).json({ error: 'Internal server error', message: error.message });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('Error fetching RevenueCat offerings:', message);
+    res.status(500).json({ error: 'Internal server error', message: message });
   }
 });
 
@@ -653,8 +662,9 @@ app.get('/api/entitlement', async (req, res) => {
   try {
     const entitlement = await getEntitlementByDevice(req.deviceId);
     res.json(entitlement);
-  } catch (error) {
-    console.error('Error getting entitlement:', error);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('Error getting entitlement:', message);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -681,8 +691,9 @@ app.post('/api/scan', upload.single('image'), async (req, res) => {
     // Perform the actual scan
     await doScan(req, res);
     
-  } catch (error) {
-    console.error('Error in scan endpoint:', error);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('Error in scan endpoint:', message);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -727,8 +738,9 @@ app.post('/api/checkout', async (req, res) => {
     console.log(`✅ Created checkout session ${session.id} for device ${req.deviceId}, plan: ${plan}`);
     res.json({ url: session.url });
     
-  } catch (error) {
-    console.error('Error creating checkout session:', error);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('Error creating checkout session:', message);
     if (error instanceof z.ZodError) {
       return res.status(400).json({ error: 'Invalid request body', details: error.errors });
     }
@@ -784,11 +796,12 @@ async function doScan(req, res) {
       success: true,
       message: aiMessage
     });
-  } catch (error) {
-    console.error('Error analyzing equipment:', error);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('Error analyzing equipment:', message);
     res.status(500).json({
       error: 'Internal server error',
-      message: error.message || 'Failed to analyze the image'
+      message: message || 'Failed to analyze the image'
     });
   }
 }

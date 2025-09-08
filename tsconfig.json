@@ -12,7 +12,8 @@
     "allowJs": true,
     "types": ["node", "express", "multer"],
     "noImplicitAny": false,
-    "noEmitOnError": false
+    "noEmitOnError": false,
+    "useUnknownInCatchVariables": false
   },
   "include": ["src/**/*"]
 }

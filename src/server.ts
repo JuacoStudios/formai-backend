@@ -325,6 +325,13 @@ async function ensureDeviceId(req, res, next) {
 // Apply device ID middleware only to API routes
 app.use('/api', ensureDeviceId);
 
+// Import and mount analyze route BEFORE other API routes
+const analyzeRouter = require('./routes/analyze');
+app.use('/api', analyzeRouter);
+
+// Log mounted endpoints
+console.info('Mounted endpoint: /api/analyze');
+
 // Configure multer for handling file uploads
 const storage = multer.memoryStorage();
 const upload = multer({ 
@@ -784,12 +791,6 @@ async function doScan(req, res) {
   }
 }
 
-// Import and mount analyze route
-const analyzeRouter = require('./routes/analyze');
-app.use('/api', analyzeRouter);
-
-// Log mounted endpoints
-console.info('Mounted endpoint: /api/analyze');
 
 // Error handling middleware
 app.use((error, req, res, next) => {

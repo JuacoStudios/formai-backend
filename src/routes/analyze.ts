@@ -19,9 +19,32 @@ function extractImageBuffer(req: Request): Buffer | null {
   return null;
 }
 
-// POST /api/analyze
+// POST /analyze - Alias for /api/scan with same logic
 router.post('/analyze', upload.single('image'), async (req: Request, res: Response, next: NextFunction) => {
   try {
+    // Check if device can perform scan (same logic as /api/scan)
+    const { getEntitlementByDevice, canPerformScan, incrementScanUsage } = require('../lib/entitlement');
+    
+    const deviceId = (req as any).deviceId;
+    if (!deviceId) {
+      return res.status(400).json({ error: 'Device ID required' });
+    }
+
+    const { canScan, reason } = await canPerformScan(deviceId);
+    
+    if (!canScan) {
+      return res.status(402).json({ 
+        requirePaywall: true, 
+        reason: reason || 'limit_exceeded' 
+      });
+    }
+    
+    // If this is a free scan (not premium), increment usage
+    const entitlement = await getEntitlementByDevice(deviceId);
+    if (!entitlement.active) {
+      await incrementScanUsage(deviceId);
+    }
+
     const img = extractImageBuffer(req);
     if (!img) {
       return res.status(400).json({ 

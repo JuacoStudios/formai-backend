@@ -237,31 +237,25 @@ app.post("/webhooks/stripe", express.raw({ type: "application/json" }), async (r
 
 
 // --- CORS bootstrap additions ---
+// Allow Vercel previews for this project and local dev ports
+const allowlist = [
+  new RegExp('^https://form-ai-website[a-z0-9\-]*\.vercel\.app$', 'i'),
+  new RegExp('^http://localhost:(3000|5173)$', 'i'),
+];
+
 const isAllowedOrigin = (origin?: string) => {
   if (!origin) return true; // allow curl/health/no-origin
-
-  // Production (exact)
-  if (origin === "https://form-ai-websitee.vercel.app") return true;
-
-  // Vercel previews of this project (two variants; keep both)
-  const previewOk =
-    /^https:\/\/form-ai-websitee-[a-z0-9-]+\.vercel\.app$/.test(origin) ||
-    /^https:\/\/form-ai-webstiee-[a-z0-9-]+\.vercel\.app$/.test(origin);
-  if (previewOk) return true;
-
-  // Local development
-  if (origin === "http://localhost:3000") return true;
-
-  return false;
+  return allowlist.some((re) => re.test(origin));
 };
 
 const corsOptions = {
   origin: (origin: string | undefined, cb: (err: Error | null, allow?: boolean) => void) => {
-    if (isAllowedOrigin(origin)) return cb(null, true);
-    return cb(new Error(`Not allowed by CORS: ${origin}`));
+    if (!origin) return cb(null, true);
+    const ok = allowlist.some((re) => re.test(origin));
+    return cb(ok ? null : new Error('CORS: origin not allowed'), ok);
   },
   credentials: true,
-  methods: ["GET", "POST", "OPTIONS"],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
 };
 
@@ -286,7 +280,7 @@ app.options("*", cors(corsOptions));
 
 // Cookie parser and JSON body parser
 app.use(cookieParser());
-app.use(express.json({ limit: '8mb' }));
+app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '8mb' }));
 
 // Security hardening
@@ -328,12 +322,12 @@ async function ensureDeviceId(req, res, next) {
 // Apply device ID middleware only to API routes
 app.use('/api', ensureDeviceId);
 
-// Import and mount analyze route BEFORE other API routes
-const analyzeRouter = require('./routes/analyze');
-app.use('/api', analyzeRouter);
+// Import and mount API root router ONCE
+const apiRootRouter = require('./routes').default || require('./routes');
+app.use('/api', apiRootRouter);
 
 // Log mounted endpoints
-console.info('Mounted endpoint: /api/analyze');
+console.info('Mounted endpoint: /api (root)');
 
 // Configure multer for handling file uploads
 const storage = multer.memoryStorage();

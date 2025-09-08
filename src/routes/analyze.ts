@@ -1,13 +1,13 @@
-const { Router } = require('express');
-const multerLib = require('multer');
+import { Router, type Request, type Response } from 'express';
+import multer from 'multer';
 
 const router = Router();
-const uploadMiddleware = multerLib({ storage: multerLib.memoryStorage() });
+const upload = multer({ storage: multer.memoryStorage() });
 
 // POST /analyze - Alias for /api/scan with same logic
-router.post('/analyze', uploadMiddleware.single('image'), async (req, res) => {
-  const file = req.file;
-  const base64 = typeof req.body?.image === 'string' ? req.body.image : undefined;
+router.post('/analyze', upload.single('image'), async (req: Request, res: Response) => {
+  const file = req.file as Express.Multer.File | undefined;
+  const base64 = typeof (req as any)?.body?.image === 'string' ? (req as any).body.image : undefined;
 
   if (!file && !base64) {
     return res.status(400).json({ error: 'No image provided' });
@@ -16,7 +16,7 @@ router.post('/analyze', uploadMiddleware.single('image'), async (req, res) => {
   // Check if device can perform scan (same logic as /api/scan)
   const { getEntitlementByDevice, canPerformScan, incrementScanUsage } = require('../lib/entitlement');
   
-  const deviceId = req.deviceId;
+  const deviceId = (req as any).deviceId as string | undefined;
   if (!deviceId) {
     return res.status(400).json({ error: 'Device ID required' });
   }
@@ -40,4 +40,4 @@ router.post('/analyze', uploadMiddleware.single('image'), async (req, res) => {
   return res.json({ ok: true });
 });
 
-module.exports = router;
+export default router;

@@ -270,7 +270,9 @@ app.use(cors(corsOptions));
 // Post-CORS shim to ensure consistent headers + proper OPTIONS
 app.use((req, res, next) => {
   const o = req.headers.origin as string | undefined;
-  if (isAllowedOrigin(o)) res.setHeader("Access-Control-Allow-Origin", o!);
+  if (isAllowedOrigin(o) && o) {
+    res.setHeader("Access-Control-Allow-Origin", o);
+  }
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Credentials", "true");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");

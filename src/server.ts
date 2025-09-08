@@ -742,9 +742,10 @@ app.post('/api/checkout', async (req, res) => {
     const message = error instanceof Error ? error.message : String(error);
     console.error('Error creating checkout session:', message);
     if (error instanceof z.ZodError) {
-      return res.status(400).json({ error: 'Invalid request body', details: error.errors });
+      const zodError = error as z.ZodError;
+      return res.status(400).json({ error: 'Invalid request body', details: zodError.issues });
     }
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: 'Internal server error', message: message });
   }
 });
 

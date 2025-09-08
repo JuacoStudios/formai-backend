@@ -1,69 +1,43 @@
-import { Router, Request, Response, NextFunction } from 'express';
+import { Router, type Request, type Response } from 'express';
 import multer from 'multer';
 
 const router = Router();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
-
-// Helper to extract image as Buffer (either multipart or JSON base64)
-function extractImageBuffer(req: Request): Buffer | null {
-  // multipart/form-data: single file field 'image'
-  const file = (req as any).file as Express.Multer.File | undefined;
-  if (file && file.buffer) return file.buffer;
-
-  // JSON base64: { image: 'data:image/jpeg;base64,...' } or raw base64
-  if (req.is('application/json') && (req.body?.image || req.body?.base64)) {
-    const raw = (req.body.image || req.body.base64) as string;
-    const b64 = raw.startsWith('data:') ? raw.split(',')[1] : raw;
-    try { return Buffer.from(b64, 'base64'); } catch { return null; }
-  }
-  return null;
-}
+const upload = multer({ storage: multer.memoryStorage() });
 
 // POST /analyze - Alias for /api/scan with same logic
-router.post('/analyze', upload.single('image'), async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    // Check if device can perform scan (same logic as /api/scan)
-    const { getEntitlementByDevice, canPerformScan, incrementScanUsage } = require('../lib/entitlement');
-    
-    const deviceId = (req as any).deviceId;
-    if (!deviceId) {
-      return res.status(400).json({ error: 'Device ID required' });
-    }
+router.post('/analyze', upload.single('image'), async (req: Request, res: Response) => {
+  const file = req.file as Express.Multer.File | undefined; // provisto por @types/multer
+  const base64 = typeof req.body?.image === 'string' ? req.body.image : undefined;
 
-    const { canScan, reason } = await canPerformScan(deviceId);
-    
-    if (!canScan) {
-      return res.status(402).json({ 
-        requirePaywall: true, 
-        reason: reason || 'limit_exceeded' 
-      });
-    }
-    
-    // If this is a free scan (not premium), increment usage
-    const entitlement = await getEntitlementByDevice(deviceId);
-    if (!entitlement.active) {
-      await incrementScanUsage(deviceId);
-    }
-
-    const img = extractImageBuffer(req);
-    if (!img) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Missing image', 
-        message: 'Provide multipart field "image" or JSON { image: base64 }' 
-      });
-    }
-
-    // TODO: plug your existing analysis service here.
-    // For now, return a minimal stub so we can validate end-to-end:
-    // Example: call analyzeEquipment(img) if such function exists.
-    // const result = await analyzeEquipment(img);
-    // return res.json({ success: true, result });
-
-    return res.json({ success: true, result: 'analyze-stub-ok' });
-  } catch (err) {
-    next(err);
+  if (!file && !base64) {
+    return res.status(400).json({ error: 'No image provided' });
   }
+
+  // Check if device can perform scan (same logic as /api/scan)
+  const { getEntitlementByDevice, canPerformScan, incrementScanUsage } = require('../lib/entitlement');
+  
+  const deviceId = (req as any).deviceId;
+  if (!deviceId) {
+    return res.status(400).json({ error: 'Device ID required' });
+  }
+
+  const { canScan, reason } = await canPerformScan(deviceId);
+  
+  if (!canScan) {
+    return res.status(402).json({ 
+      requirePaywall: true, 
+      reason: reason || 'limit_exceeded' 
+    });
+  }
+  
+  // If this is a free scan (not premium), increment usage
+  const entitlement = await getEntitlementByDevice(deviceId);
+  if (!entitlement.active) {
+    await incrementScanUsage(deviceId);
+  }
+
+  // TODO: lógica de análisis
+  return res.json({ ok: true });
 });
 
 export default router;

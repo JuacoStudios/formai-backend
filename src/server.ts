@@ -798,9 +798,49 @@ async function doScan(req, res) {
       throw new Error('No response from OpenAI');
     }
 
+    // Parse AI response to structured format
+    const parseAIResponse = (aiMessage: string) => {
+      const lines = aiMessage.split('\n');
+      const machine = { id: 'unknown', name: 'Unknown Equipment', confidence: 0.8 };
+      const instructions: string[] = [];
+      const mistakes: string[] = [];
+      const recommendations: string[] = [];
+      
+      let currentSection = '';
+      
+      for (const line of lines) {
+        if (line.includes('Machine Identification')) {
+          currentSection = 'machine';
+        } else if (line.includes('Step-by-Step Instructions')) {
+          currentSection = 'instructions';
+        } else if (line.includes('Common Mistakes')) {
+          currentSection = 'mistakes';
+        } else if (line.includes('Safety Tips')) {
+          currentSection = 'recommendations';
+        } else if (line.startsWith('-') && currentSection) {
+          const content = line.replace(/^-\s*/, '').trim();
+          if (currentSection === 'machine' && line.includes('Name:')) {
+            machine.name = content.replace('Name: ', '');
+          } else if (currentSection === 'instructions') {
+            instructions.push(content);
+          } else if (currentSection === 'mistakes') {
+            mistakes.push(content);
+          } else if (currentSection === 'recommendations') {
+            recommendations.push(content);
+          }
+        }
+      }
+      return { machine, instructions, mistakes, recommendations };
+    };
+
+    const parsedResponse = parseAIResponse(aiMessage);
     res.json({
       success: true,
-      message: aiMessage
+      machine: parsedResponse.machine,
+      instructions: parsedResponse.instructions,
+      mistakes: parsedResponse.mistakes,
+      recommendations: parsedResponse.recommendations,
+      previewUrl: null
     });
   } catch (error: unknown) {
     console.error('Error analyzing equipment:', error);

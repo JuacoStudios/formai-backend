@@ -119,3 +119,4 @@ export async function canPerformScan(deviceId: string): Promise<{ canScan: boole
 
 
 
+

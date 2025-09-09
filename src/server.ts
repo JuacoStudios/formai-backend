@@ -356,6 +356,18 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
+// Database health check endpoint
+app.get('/health/db', async (req, res) => {
+  try {
+    const { prisma } = require('./db/prisma');
+    await prisma.$queryRaw`SELECT 1`;
+    res.json({ ok: true });
+  } catch (error: unknown) {
+    console.error('Database health check failed:', error);
+    res.status(500).json({ ok: false, error: 'Database connection failed' });
+  }
+});
+
 // Debug endpoint for body parsing verification
 app.post('/api/debug/echo', (req, res) => {
   console.log('🔍 Debug echo request body:', req.body);
@@ -663,6 +675,27 @@ app.post('/api/scan', upload.single('image'), async (req, res) => {
   }
 });
 
+// POST /api/analyze - Alias for /api/scan for compatibility
+app.post('/api/analyze', upload.single('image'), async (req, res) => {
+  try {
+    const { canScan, reason } = await canPerformScan((req as any).deviceId);
+    if (!canScan) {
+      return res.status(402).json({ 
+        requirePaywall: true, 
+        reason: reason || 'limit_exceeded' 
+      });
+    }
+    const entitlement = await getEntitlementByDevice((req as any).deviceId);
+    if (!entitlement.active) {
+      await incrementScanUsage((req as any).deviceId);
+    }
+    await doScan(req, res);
+  } catch (error: unknown) {
+    console.error('Error in analyze endpoint:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // POST /api/checkout - Create Stripe checkout session (CONSOLIDATED)
 app.post('/api/checkout', async (req, res) => {
   try {
@@ -811,7 +844,7 @@ app.use('*', (req, res) => {
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📍 Health check: http://localhost:${PORT}/health`);
-  console.log(`🔍 Analyze endpoint: http://localhost:${PORT}/api/analyze`);
+  console.log(`🔍 Scan endpoint: http://localhost:${PORT}/api/scan`);
   console.log(`💳 Checkout endpoint: http://localhost:${PORT}/api/checkout`);
   
   // Log configuration status

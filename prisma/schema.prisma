@@ -38,6 +38,7 @@ model Subscription {
 }
 
 model UsageCounter {
+  
   id          String    @id @default(uuid())
   deviceId    String    @unique
   device      Device    @relation(fields: [deviceId], references: [id])

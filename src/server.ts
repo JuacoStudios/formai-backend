@@ -368,6 +368,19 @@ app.get('/health/db', async (req, res) => {
   }
 });
 
+// Test endpoint for /api/analyze debugging
+app.get('/api/analyze/test', (req, res) => {
+  console.log("🧪 /api/analyze/test endpoint called");
+  res.json({
+    success: true,
+    machine: { id: 'test', name: 'Test Machine', confidence: 0.9 },
+    instructions: ['Test instruction 1', 'Test instruction 2'],
+    mistakes: ['Test mistake 1', 'Test mistake 2'],
+    recommendations: ['Test recommendation 1', 'Test recommendation 2'],
+    previewUrl: null
+  });
+});
+
 // Debug endpoint for body parsing verification
 app.post('/api/debug/echo', (req, res) => {
   console.log('🔍 Debug echo request body:', req.body);
@@ -679,6 +692,12 @@ app.post('/api/scan', upload.single('image'), async (req, res) => {
 app.post('/api/analyze', upload.single('image'), async (req, res) => {
   try {
     console.log("🔍 /api/analyze endpoint called");
+    console.log("📊 Request details:", {
+      hasFile: !!req.file,
+      fileSize: req.file?.size,
+      deviceId: (req as any).deviceId,
+      contentType: req.headers['content-type']
+    });
     
     const { canScan, reason } = await canPerformScan((req as any).deviceId);
     if (!canScan) {

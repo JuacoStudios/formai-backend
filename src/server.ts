@@ -398,7 +398,6 @@ app.get('/api/analyze/test', (req, res) => {
   });
 });
 
-
 // Debug endpoint for body parsing verification
 app.post('/api/debug/echo', (req, res) => {
   console.log('🔍 Debug echo request body:', req.body);

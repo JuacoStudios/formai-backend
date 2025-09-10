@@ -356,8 +356,25 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
+// API health alias (clients call /api/health)
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
 // Database health check endpoint
 app.get('/health/db', async (req, res) => {
+  try {
+    const { prisma } = require('./db/prisma');
+    await prisma.$queryRaw`SELECT 1`;
+    res.json({ ok: true });
+  } catch (error: unknown) {
+    console.error('Database health check failed:', error);
+    res.status(500).json({ ok: false, error: 'Database connection failed' });
+  }
+});
+
+// API alias for DB health
+app.get('/api/health/db', async (req, res) => {
   try {
     const { prisma } = require('./db/prisma');
     await prisma.$queryRaw`SELECT 1`;
@@ -380,6 +397,7 @@ app.get('/api/analyze/test', (req, res) => {
     previewUrl: null
   });
 });
+
 
 // Debug endpoint for body parsing verification
 app.post('/api/debug/echo', (req, res) => {

@@ -713,7 +713,9 @@ app.post('/api/analyze', upload.single('image'), async (req, res) => {
       hasFile: !!req.file,
       fileSize: req.file?.size,
       deviceId: (req as any).deviceId,
-      contentType: req.headers['content-type']
+      contentType: req.headers['content-type'],
+      bodyKeys: Object.keys(req.body || {}),
+      files: Object.keys(req.files || {})
     });
     
     const { canScan, reason } = await canPerformScan((req as any).deviceId);
@@ -732,6 +734,12 @@ app.post('/api/analyze', upload.single('image'), async (req, res) => {
     
     // Direct implementation instead of calling doScan
     if (!req.file) {
+      console.log("❌ No file received in /api/analyze");
+      console.log("📊 Debug info:", {
+        contentType: req.headers['content-type'],
+        body: req.body,
+        files: req.files
+      });
       return res.status(400).json({ 
         error: 'No image provided',
         message: 'Please upload an image file'

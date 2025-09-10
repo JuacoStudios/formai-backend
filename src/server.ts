@@ -675,21 +675,112 @@ app.post('/api/scan', upload.single('image'), async (req, res) => {
   }
 });
 
-// POST /api/analyze - Alias for /api/scan for compatibility
+// POST /api/analyze - Direct implementation with structured response
 app.post('/api/analyze', upload.single('image'), async (req, res) => {
   try {
+    console.log("🔍 /api/analyze endpoint called");
+    
     const { canScan, reason } = await canPerformScan((req as any).deviceId);
     if (!canScan) {
+      console.log("❌ Scan not allowed:", reason);
       return res.status(402).json({ 
         requirePaywall: true, 
         reason: reason || 'limit_exceeded' 
       });
     }
+    
     const entitlement = await getEntitlementByDevice((req as any).deviceId);
     if (!entitlement.active) {
       await incrementScanUsage((req as any).deviceId);
     }
-    await doScan(req, res);
+    
+    // Direct implementation instead of calling doScan
+    if (!req.file) {
+      return res.status(400).json({ 
+        error: 'No image provided',
+        message: 'Please upload an image file'
+      });
+    }
+
+    console.log("✅ Prompt sent to OpenAI from /api/analyze");
+
+    // Convertir buffer a base64
+    const base64Image = req.file.buffer.toString('base64');
+    const dataUrl = `data:${req.file.mimetype};base64,${base64Image}`;
+
+    // Prompt estructurado para GPT-4 Vision
+    const prompt = `You are an Expert Fitness Trainer. Analyze the gym equipment in the provided image and respond in the following Markdown format:\n\n## Machine Identification\n- Name: [Equipment Name]\n\n## Muscles Targeted\n- Primary: [Main muscles]\n- Secondary: [Other muscles]\n\n## Step-by-Step Instructions\n1. [Step 1]\n2. [Step 2]\n3. [Step 3]\n...\n\n## Common Mistakes\n- [Mistake 1]\n- [Mistake 2]\n- [Mistake 3]\n\n## Safety Tips\n- [Tip 1]\n- [Tip 2]\n\nBe concise, clear, and ensure each section is filled. If unsure, state "Not clearly visible" in the relevant section.`;
+
+    // Llamada a OpenAI Vision
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [
+        {
+          role: 'system',
+          content: prompt
+        },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: prompt },
+            { type: 'image_url', image_url: { url: dataUrl } }
+          ]
+        }
+      ],
+      max_tokens: 1024
+    });
+
+    const aiMessage = completion.choices?.[0]?.message?.content || null;
+    if (!aiMessage) {
+      throw new Error('No response from OpenAI');
+    }
+
+    // Parse AI response to structured format
+    const parseAIResponse = (aiMessage: string) => {
+      const lines = aiMessage.split('\n');
+      const machine = { id: 'unknown', name: 'Unknown Equipment', confidence: 0.8 };
+      const instructions: string[] = [];
+      const mistakes: string[] = [];
+      const recommendations: string[] = [];
+      
+      let currentSection = '';
+      
+      for (const line of lines) {
+        if (line.includes('Machine Identification')) {
+          currentSection = 'machine';
+        } else if (line.includes('Step-by-Step Instructions')) {
+          currentSection = 'instructions';
+        } else if (line.includes('Common Mistakes')) {
+          currentSection = 'mistakes';
+        } else if (line.includes('Safety Tips')) {
+          currentSection = 'recommendations';
+        } else if (line.startsWith('-') && currentSection) {
+          const content = line.replace(/^-\s*/, '').trim();
+          if (currentSection === 'machine' && line.includes('Name:')) {
+            machine.name = content.replace('Name: ', '');
+          } else if (currentSection === 'instructions') {
+            instructions.push(content);
+          } else if (currentSection === 'mistakes') {
+            mistakes.push(content);
+          } else if (currentSection === 'recommendations') {
+            recommendations.push(content);
+          }
+        }
+      }
+      return { machine, instructions, mistakes, recommendations };
+    };
+
+    const parsedResponse = parseAIResponse(aiMessage);
+    console.log("✅ Structured response generated:", parsedResponse.machine.name);
+    
+    res.json({
+      success: true,
+      machine: parsedResponse.machine,
+      instructions: parsedResponse.instructions,
+      mistakes: parsedResponse.mistakes,
+      recommendations: parsedResponse.recommendations,
+      previewUrl: null
+    });
   } catch (error: unknown) {
     console.error('Error in analyze endpoint:', error);
     res.status(500).json({ error: 'Internal server error' });

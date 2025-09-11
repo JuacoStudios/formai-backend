@@ -366,10 +366,10 @@ app.get('/health/db', async (req, res) => {
   try {
     const { prisma } = require('./db/prisma');
     await prisma.$queryRaw`SELECT 1`;
-    res.json({ ok: true });
+    res.json({ status: 'ok' });
   } catch (error: unknown) {
     console.error('Database health check failed:', error);
-    res.status(500).json({ ok: false, error: 'Database connection failed' });
+    res.status(500).json({ status: 'error', error: 'Database connection failed' });
   }
 });
 
@@ -378,10 +378,10 @@ app.get('/api/health/db', async (req, res) => {
   try {
     const { prisma } = require('./db/prisma');
     await prisma.$queryRaw`SELECT 1`;
-    res.json({ ok: true });
+    res.json({ status: 'ok' });
   } catch (error: unknown) {
     console.error('Database health check failed:', error);
-    res.status(500).json({ ok: false, error: 'Database connection failed' });
+    res.status(500).json({ status: 'error', error: 'Database connection failed' });
   }
 });
 
@@ -741,8 +741,11 @@ app.post('/api/analyze', upload.single('image'), async (req, res) => {
         files: req.files
       });
       return res.status(400).json({ 
-        error: 'No image provided',
-        message: 'Please upload an image file'
+        success: false,
+        error: {
+          code: 'NO_IMAGE',
+          message: 'No image provided'
+        }
       });
     }
 
@@ -827,7 +830,13 @@ app.post('/api/analyze', upload.single('image'), async (req, res) => {
     });
   } catch (error: unknown) {
     console.error('Error in analyze endpoint:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ 
+      success: false, 
+      error: { 
+        code: 'INTERNAL_ERROR', 
+        message: 'Internal server error' 
+      } 
+    });
   }
 });
 
@@ -894,8 +903,11 @@ async function doScan(req, res) {
   try {
     if (!req.file) {
       return res.status(400).json({ 
-        error: 'No image provided',
-        message: 'Please upload an image file'
+        success: false,
+        error: {
+          code: 'NO_IMAGE',
+          message: 'No image provided'
+        }
       });
     }
 

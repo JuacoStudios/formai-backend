@@ -63,3 +63,5 @@ CREATE UNIQUE INDEX "DeviceMap_stripeSubscriptionId_key" ON "DeviceMap"("stripeS
 -- AddForeignKey
 ALTER TABLE "Subscription" ADD CONSTRAINT "Subscription_deviceId_fkey" FOREIGN KEY ("deviceId") REFERENCES "Device"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 ALTER TABLE "UsageCounter" ADD CONSTRAINT "UsageCounter_deviceId_fkey" FOREIGN KEY ("deviceId") REFERENCES "Device"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+

@@ -1,329 +1,63 @@
-require('dotenv').config();
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import routesMaybe from './routes'; // default export expected
-const cookieParser = require('cookie-parser');
-const multer = require('multer');
-const path = require('path');
-const { v4: uuidv4 } = require('uuid');
-const { z } = require('zod');
-const { OpenAI } = require('openai');
-const Stripe = require('stripe'); // STRIPE: Add Stripe SDK
-const { 
-  getEntitlementByDevice, 
-  canPerformScan, 
-  incrementScanUsage 
-} = require('./lib/entitlement');
+import cookieParser from 'cookie-parser';
+import multer from 'multer';
+import { v4 as uuidv4 } from 'uuid';
+import { z } from 'zod';
+import { OpenAI } from 'openai';
+import Stripe from 'stripe';
+import { PrismaClient } from '@prisma/client';
 
 const app = express();
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 3001;
+const prisma = new PrismaClient();
 
-// Environment constants
-const PRICE_MONTHLY = process.env.STRIPE_PRICE_ID_MONTHLY!;
-const PRICE_ANNUAL = process.env.STRIPE_PRICE_ID_ANNUAL || undefined;
-const WEB_URL = process.env.WEB_URL!;
+// Initialize Stripe
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
+  apiVersion: '2024-06-20'
+});
 
+// Initialize OpenAI
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
 
 // Trust proxy for secure cookies behind Render/NGINX
 app.set('trust proxy', 1);
 
-// Collapse accidental "/api/api/*" -> "/api/*" to avoid 404s if the client double-prefixes.
-app.use((req, _res, next) => {
-  if (req.url.startsWith('/api/api/')) {
-    const fixed = req.url.replace(/^\/api\/api\//, '/api/');
-    console.warn('[ROUTE NORMALIZER] Collapsing', req.url, '->', fixed);
-    req.url = fixed;
-  }
-  // Optional: collapse any double slashes except the protocol prefix
-  req.url = req.url.replace(/\/{2,}/g, '/');
-  next();
-});
-
-// STRIPE: Initialize Stripe with environment variable
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { 
-  apiVersion: "2024-06-20" 
-});
-
-// Simple in-memory store for subscriptions by userId
-// Replace later with a DB if needed
-const Subscriptions = new Map(); // key: userId, value: { active, plan, currentPeriodEnd, customerId, subscriptionId }
-
-// STRIPE: Webhook needs raw body for signature verification - MUST be before JSON parsing
-app.post("/webhooks/stripe", express.raw({ type: "application/json" }), async (req, res) => {
-  const sig = req.headers["stripe-signature"];
-  let event;
-
-  try {
-    if (!sig) {
-      console.error('❌ Missing Stripe signature header');
-      return res.status(400).send('Missing signature');
-    }
-    
-    event = stripe.webhooks.constructEvent(
-      req.body,
-      sig,
-      process.env.STRIPE_WEBHOOK_SECRET
-    );
-  } catch (err: unknown) {
-    console.error("❌ Webhook signature verification failed:", err);
-    const errorMessage = err instanceof Error ? err.message : 'Unknown error occurred';
-    return res.status(400).send(`Webhook Error: ${errorMessage}`);
-  }
-
-  // Idempotency check - if we've already processed this event, return 200
-  const { prisma } = require('./db/prisma');
-  const existingEvent = await prisma.webhookEvent.findUnique({
-    where: { id: event.id }
-  });
-
-  if (existingEvent) {
-    console.log(`ℹ️ Event ${event.id} already processed, skipping`);
-    return res.status(200).send('ok');
-  }
-
-  // Store the event for idempotency
-  await prisma.webhookEvent.create({
-    data: {
-      id: event.id,
-      provider: 'stripe',
-      type: event.type,
-      payload: event
-    }
-  });
-
-  try {
-    switch (event.type) {
-      case "checkout.session.completed": {
-        const session = event.data.object;
-        const deviceId = session.client_reference_id || session?.metadata?.deviceId;
-        
-        if (deviceId && session.mode === 'subscription' && session.subscription) {
-          // Create device mappings for subscription and customer
-          await prisma.deviceMap.createMany({
-            data: [
-              {
-                provider: 'stripe',
-                key: `subscription:${session.subscription}`,
-                deviceId
-              },
-              {
-                provider: 'stripe',
-                key: `customer:${session.customer}`,
-                deviceId
-              }
-            ],
-            skipDuplicates: true
-          });
-          
-          console.log(`✅ Created device mappings for device ${deviceId}`);
-        }
-        break;
-      }
-      
-      case "customer.subscription.created":
-      case "customer.subscription.updated": {
-        const subscription = event.data.object;
-        const subId = subscription.id;
-        const customerId = subscription.customer;
-        
-        // Find device by subscription or customer mapping
-        const deviceMap = await prisma.deviceMap.findFirst({
-          where: {
-            OR: [
-              { provider: 'stripe', key: `subscription:${subId}` },
-              { provider: 'stripe', key: `customer:${customerId}` }
-            ]
-          }
-        });
-        
-        if (deviceMap) {
-          const status = subscription.status;
-          const price = subscription.items?.data?.[0]?.price;
-          const plan = price?.recurring?.interval === "month" ? "monthly" : 
-                      price?.recurring?.interval === "year" ? "annual" : null;
-          
-          // Upsert subscription
-          await prisma.subscription.upsert({
-            where: { providerSubscriptionId: subId },
-            update: {
-              status,
-              plan,
-              currentPeriodEnd: subscription.current_period_end ? 
-                new Date(subscription.current_period_end * 1000) : null,
-              cancelAtPeriodEnd: subscription.cancel_at_period_end ? 
-                new Date(subscription.cancel_at_period_end * 1000) : null,
-              deviceId: deviceMap.deviceId
-            },
-            create: {
-              provider: 'stripe',
-              providerCustomerId: customerId,
-              providerSubscriptionId: subId,
-              status,
-              plan,
-              currentPeriodEnd: subscription.current_period_end ? 
-                new Date(subscription.current_period_end * 1000) : null,
-              cancelAtPeriodEnd: subscription.cancel_at_period_end ? 
-                new Date(subscription.cancel_at_period_end * 1000) : null,
-              deviceId: deviceMap.deviceId
-            }
-          });
-          
-          console.log(`✅ Upserted subscription ${subId} for device ${deviceMap.deviceId}`);
-        } else {
-          console.warn(`⚠️ No device mapping found for subscription ${subId}`);
-        }
-        break;
-      }
-      
-      case "customer.subscription.deleted": {
-        const subscription = event.data.object;
-        const subId = subscription.id;
-        
-        // Update subscription status to canceled
-        await prisma.subscription.updateMany({
-          where: { providerSubscriptionId: subId },
-          data: { status: 'canceled' }
-        });
-        
-        console.log(`✅ Marked subscription ${subId} as canceled`);
-        break;
-      }
-      
-      case "invoice.payment_failed": {
-        const invoice = event.data.object;
-        const subscriptionId = invoice.subscription;
-        
-        if (subscriptionId) {
-          // Mark subscription as past_due
-          await prisma.subscription.updateMany({
-            where: { providerSubscriptionId: subscriptionId },
-            data: { status: 'past_due' }
-          });
-          
-          console.log(`✅ Marked subscription ${subscriptionId} as past_due due to payment failure`);
-        }
-        break;
-      }
-      
-      case "invoice.paid": {
-        const invoice = event.data.object;
-        const subscriptionId = invoice.subscription;
-        
-        if (subscriptionId) {
-          // Reactivate subscription if it was past_due
-          await prisma.subscription.updateMany({
-            where: { 
-              providerSubscriptionId: subscriptionId,
-              status: 'past_due'
-            },
-            data: { status: 'active' }
-          });
-          
-          console.log(`✅ Reactivated subscription ${subscriptionId} after successful payment`);
-        }
-        break;
-      }
-      
-      default:
-        console.log(`ℹ️ Unhandled Stripe event: ${event.type}`);
-        break;
-    }
-  } catch (error: unknown) {
-    console.error(`❌ Error processing webhook event ${event.id}:`, error);
-    // Still return 200 to avoid retries
-  }
-
-  res.status(200).send('ok');
-});
-
-
-// --- CORS bootstrap additions ---
-const allowlist = [
-  /^https:\/\/form-ai-website[a-z0-9\-]*\.vercel\.app$/i,
-  /^http:\/\/localhost:(3000|5173)$/
-];
-
+// CORS configuration for Vercel domains
 const corsOptions: cors.CorsOptions = {
-  origin(origin, cb) {
-    if (!origin) return cb(null, true); // curl/Postman
-    const ok = allowlist.some(re => re.test(origin));
-    return cb(ok ? null : new Error('CORS: origin not allowed'), ok);
+  origin: (origin, callback) => {
+    const allowedOrigins = [
+      /^https:\/\/formai-[a-z0-9\-]*\.vercel\.app$/,
+      /^http:\/\/localhost:3000$/,
+      /^http:\/\/localhost:3001$/
+    ];
+    
+    if (!origin || allowedOrigins.some(regex => regex.test(origin))) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 };
 
-// Mount early, before routes and error handlers
+// Middleware
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
-
-// Cookie parser and JSON body parser
 app.use(cookieParser());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '8mb' }));
-
-// Security hardening
 app.disable('x-powered-by');
 
-// ensureDeviceId middleware for /api/* only
-async function ensureDeviceId(req, res, next) {
-  let id = req.cookies['fa_device'];
-  const isProd = process.env.NODE_ENV === 'production';
-
-  if (!id) {
-    id = uuidv4();
-    res.cookie('fa_device', id, {
-      httpOnly: true,
-      secure: isProd,                          // requires HTTPS in prod
-      sameSite: isProd ? 'none' : 'lax',       // cross-site cookie for Vercel → Render
-      path: '/',
-      maxAge: 365 * 24 * 60 * 60 * 1000,       // 1 year
-    });
-  }
-  
-  // Upsert device in database
-  try {
-    const { prisma } = require('./db/prisma');
-    await prisma.device.upsert({
-      where: { id },
-      update: { lastSeen: new Date() },
-      create: { id, lastSeen: new Date() }
-    });
-  } catch (error: unknown) {
-    console.error('Error upserting device:', error);
-    // Continue anyway - don't block the request
-  }
-  
-  req.deviceId = id;
-  next();
-}
-
-// Apply device ID middleware only to API routes
-app.use('/api', ensureDeviceId);
-
-// Interop guard (before mounting) to fail loudly if the routes export isn't a Router
-const api: any = (routesMaybe as any)?.default ?? routesMaybe;
-if (typeof api?.use !== 'function') {
-  console.error('Invalid API router export. typeof =', typeof api, 'keys=', Object.keys(api || {}));
-  throw new Error('Routes export is not an Express Router');
-}
-
-// Mount once and keep a JSON 404 fallback
-app.use('/api', api);
-
-// Log mounted endpoints
-console.info('Mounted endpoint: /api (root)');
-
-// Configure multer for handling file uploads
-const storage = multer.memoryStorage();
-const upload = multer({ 
-  storage: storage,
-  limits: {
-    fileSize: 10 * 1024 * 1024, // 10MB limit
-  },
+// Multer configuration
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
   fileFilter: (req, file, cb) => {
-    // Accept only image files
     if (file.mimetype.startsWith('image/')) {
       cb(null, true);
     } else {
@@ -332,676 +66,336 @@ const upload = multer({
   }
 });
 
-// OPTIONAL: Debug endpoint (enable in dev or protect with key)
-if (process.env.NODE_ENV !== "production" || process.env.CORS_DEBUG_KEY) {
-  app.get("/api/debug/cors", (req, res) => {
-    const requestOrigin = req.headers.origin as string | undefined;
-    const isAllowed = allowlist.some(re => re.test(requestOrigin || ''));
-    res.json({
-      allowedOrigins: ["https://form-ai-websitee.vercel.app", "http://localhost:3000", "Vercel previews"],
-      requestOrigin: requestOrigin || null,
-      isAllowed,
-      nodeEnv: process.env.NODE_ENV || null,
-      hasDebugKey: Boolean(process.env.CORS_DEBUG_KEY),
+// Device ID middleware
+async function ensureDeviceId(req: any, res: any, next: any) {
+  let deviceId = req.cookies['fa_device'];
+  const isProd = process.env.NODE_ENV === 'production';
+
+  if (!deviceId) {
+    deviceId = uuidv4();
+    res.cookie('fa_device', deviceId, {
+      httpOnly: true,
+      secure: isProd,
+      sameSite: isProd ? 'none' : 'lax',
+      path: '/',
+      maxAge: 365 * 24 * 60 * 60 * 1000, // 1 year
     });
-  });
+  }
+
+  // Upsert device in database
+  try {
+    await prisma.device.upsert({
+      where: { id: deviceId },
+      update: { lastSeen: new Date() },
+      create: { id: deviceId, lastSeen: new Date() }
+    });
+  } catch (error) {
+    console.error('Error upserting device:', error);
+  }
+
+  req.deviceId = deviceId;
+  next();
 }
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
+// Apply device ID middleware to API routes
+app.use('/api', ensureDeviceId);
 
-// Health check endpoint (root level)
+// Health check endpoints
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// API health alias (clients call /api/health)
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok' });
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Database health check endpoint
-app.get('/health/db', async (req, res) => {
-  try {
-    const { prisma } = require('./db/prisma');
-    await prisma.$queryRaw`SELECT 1`;
-    res.json({ status: 'ok' });
-  } catch (error: unknown) {
-    console.error('Database health check failed:', error);
-    res.status(500).json({ status: 'error', error: 'Database connection failed' });
-  }
-});
-
-// API alias for DB health
+// Database health check
 app.get('/api/health/db', async (req, res) => {
   try {
-    const { prisma } = require('./db/prisma');
     await prisma.$queryRaw`SELECT 1`;
     res.json({ status: 'ok' });
-  } catch (error: unknown) {
+  } catch (error) {
     console.error('Database health check failed:', error);
     res.status(500).json({ status: 'error', error: 'Database connection failed' });
   }
 });
 
-// Test endpoint for /api/analyze debugging
-app.get('/api/analyze/test', (req, res) => {
-  console.log("🧪 /api/analyze/test endpoint called");
-  res.json({
-    success: true,
-    machine: { id: 'test', name: 'Test Machine', confidence: 0.9 },
-    instructions: ['Test instruction 1', 'Test instruction 2'],
-    mistakes: ['Test mistake 1', 'Test mistake 2'],
-    recommendations: ['Test recommendation 1', 'Test recommendation 2'],
-    previewUrl: null
-  });
-});
-
-// Debug endpoint for body parsing verification
-app.post('/api/debug/echo', (req, res) => {
-  console.log('🔍 Debug echo request body:', req.body);
-  res.json({ 
-    success: true,
-    body: req.body,
-    headers: req.headers,
-    timestamp: Date.now()
-  });
-});
-
-// STRIPE: Create Stripe Checkout for subscriptions
-
-// STRIPE: Info route to expose configured price IDs (safe, no secrets)
-app.get("/api/stripe/prices", (_req, res) => {
-  res.json({
-    monthly: process.env.STRIPE_PRICE_ID_MONTHLY ? "configured" : "missing",
-    annual: process.env.STRIPE_PRICE_ID_ANNUAL ? "configured" : "missing"
-  });
-});
-
-// STRIPE: Diagnostics endpoint to verify Stripe configuration and connectivity
-app.get("/api/stripe/diagnostics", async (req, res) => {
-  const report: any = {
-    env: {
-      STRIPE_SECRET_KEY: !!process.env.STRIPE_SECRET_KEY,
-      STRIPE_WEBHOOK_SECRET: !!process.env.STRIPE_WEBHOOK_SECRET,
-      STRIPE_PRICE_ID_MONTHLY: !!process.env.STRIPE_PRICE_ID_MONTHLY,
-      STRIPE_PRICE_ID_ANNUAL: !!process.env.STRIPE_PRICE_ID_ANNUAL,
-      WEB_URL: !!process.env.WEB_URL
-    }
-  };
-  
+// User status endpoint
+app.get('/api/me', async (req: any, res) => {
   try {
-    // Verify monthly price if configured
-    if (process.env.STRIPE_PRICE_ID_MONTHLY) {
-      const p = await stripe.prices.retrieve(process.env.STRIPE_PRICE_ID_MONTHLY);
-      report.prices = { 
-        monthly: { 
-          id: p.id, 
-          active: p.active, 
-          currency: p.currency, 
-          interval: p.recurring?.interval 
+    const deviceId = req.deviceId;
+    
+    // Get device with subscription
+    const device = await prisma.device.findUnique({
+      where: { id: deviceId },
+      include: {
+        subscriptions: {
+          where: {
+            status: 'active',
+            currentPeriodEnd: { gt: new Date() }
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 1
         }
-      };
-    }
-    
-    // Verify annual price if configured
-    if (process.env.STRIPE_PRICE_ID_ANNUAL) {
-      const p = await stripe.prices.retrieve(process.env.STRIPE_PRICE_ID_ANNUAL);
-      report.prices = { 
-        ...(report.prices || {}), 
-        annual: { 
-          id: p.id, 
-          active: p.active, 
-          currency: p.currency, 
-          interval: p.recurring?.interval 
-        }
-      };
-    }
-    
-    // Verify Stripe connectivity
-    report.checkoutSessionDryRun = { ok: true };
-    
-    // Add cache information
-    report.cacheSize = Subscriptions.size;
-    
-    console.log('✅ Stripe diagnostics completed successfully');
-    
-  } catch (e: unknown) {
-    console.error('❌ Stripe diagnostics error:', e);
-    const errorMessage = e instanceof Error ? e.message : 'Unknown error occurred';
-    report.error = errorMessage;
-  }
-  
-  res.json(report);
-});
-
-// Lemon Squeezy products endpoint
-app.get('/api/products', async (req, res) => {
-  try {
-    const products = {
-      monthly: {
-        id: process.env.STRIPE_PRICE_ID_MONTHLY,
-        name: 'Monthly Plan',
-        price: 9.99
-      },
-      annual: {
-        id: process.env.STRIPE_PRICE_ID_ANNUAL,
-        name: 'Annual Plan', 
-        price: 99.99
       }
-    };
-    res.json({ 
-      success: true, 
-      data: products 
     });
-  } catch (error: unknown) {
-    console.error('Error fetching products:', error);
-    
-    // Check if it's a missing price IDs error
-    if (!process.env.STRIPE_PRICE_ID_MONTHLY || !process.env.STRIPE_PRICE_ID_ANNUAL) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'MISSING_PRICE_IDS',
-        message: 'Stripe price IDs not configured in environment'
-      });
-    }
-    
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-    res.status(500).json({ 
-      success: false, 
-      error: errorMessage || 'Failed to fetch products' 
-    });
-  }
-});
 
-// STRIPE: Products endpoint for Stripe price IDs
-app.get('/api/stripe/products', async (req, res) => {
-  try {
-    const monthlyId = process.env.STRIPE_PRICE_ID_MONTHLY;
-    const annualId = process.env.STRIPE_PRICE_ID_ANNUAL;
-    
-    if (!monthlyId || !annualId) {
-      return res.status(400).json({ 
-        error: "MISSING_PRICE_IDS",
-        message: "Stripe price IDs not configured in environment"
-      });
+    if (!device) {
+      return res.status(404).json({ error: 'Device not found' });
     }
-    
+
+    const isPremium = device.subscriptions.length > 0;
+    const subscription = device.subscriptions[0];
+
     res.json({
-      monthly: monthlyId ? { id: monthlyId, active: true } : null,
-      annual: annualId ? { id: annualId, active: true } : null
+      userId: deviceId,
+      isPremium,
+      subscription: subscription ? {
+        status: subscription.status,
+        plan: subscription.plan,
+        currentPeriodEnd: subscription.currentPeriodEnd
+      } : null,
+      scansUsed: device.scansUsed || 0,
+      scansLimit: isPremium ? -1 : 1 // -1 means unlimited
     });
-  } catch (error: unknown) {
-    console.error('Error in /api/stripe/products:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-    res.status(500).json({ 
-      error: "Failed to get Stripe products",
-      message: errorMessage 
-    });
-  }
-});
-
-
-
-
-
-// STRIPE: Get subscription status for a given userId
-app.get("/api/subscription/status", async (req, res) => {
-  try {
-    const { userId } = req.query;
-    
-    if (!userId || typeof userId !== 'string') {
-      return res.status(400).json({ 
-        active: false, 
-        plan: null, 
-        source: "stripe",
-        error: "Valid userId parameter is required" 
-      });
-    }
-    
-    console.log('🔍 Checking subscription status for userId:', userId);
-    
-    // Check in-memory store first
-    const record = Subscriptions.get(userId);
-    if (record) {
-      console.log('✅ Subscription found in cache for userId:', userId, record);
-      return res.json(record);
-    }
-    
-    // Fallback: try to find by email if userId not in cache
-    // This handles legacy cases where we might not have userId in metadata yet
-    console.log('⚠️ userId not found in cache, checking Stripe directly...');
-    
-    // For now, return not active if not in cache
-    // The webhook will populate the cache when events come in
-    return res.json({ 
-      active: false, 
-      plan: null, 
-      source: "stripe" 
-    });
-    
-  } catch (err: unknown) {
-    console.error("❌ Subscription status check error:", err);
-    return res.status(500).json({ 
-      active: false, 
-      plan: null, 
-      source: "stripe",
-      error: "Failed to check subscription status" 
-    });
-  }
-});
-
-// STRIPE: POST alias for subscription status (same logic)
-app.post("/api/subscription/refresh", async (req, res) => {
-  try {
-    const { userId } = req.body || {};
-    
-    if (!userId || typeof userId !== 'string') {
-      return res.status(400).json({ 
-        active: false, 
-        plan: null, 
-        source: "stripe",
-        error: "Valid userId in request body is required" 
-      });
-    }
-    
-    console.log('🔄 Refreshing subscription status for userId:', userId);
-    
-    // Check in-memory store
-    const record = Subscriptions.get(userId);
-    if (record) {
-      console.log('✅ Subscription found in cache for userId:', userId, record);
-      return res.json(record);
-    }
-    
-    // For now, return not active if not in cache
-    // The webhook will populate the cache when events come in
-    return res.json({ 
-      active: false, 
-      plan: null, 
-      source: "stripe" 
-    });
-    
-  } catch (err: unknown) {
-    console.error("❌ Subscription refresh error:", err);
-    return res.status(500).json({ 
-      active: false, 
-      plan: null, 
-      source: "stripe",
-      error: "Failed to refresh subscription status" 
-    });
-  }
-});
-
-
-
-// RevenueCat Offerings endpoint
-app.get('/api/revenuecat/offerings', async (req, res) => {
-  try {
-    const apiKey = process.env.REVENUECAT_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ error: 'RevenueCat API key not configured' });
-    }
-    // Llama a la API REST de RevenueCat para obtener los offerings
-    const response = await fetch('https://api.revenuecat.com/v1/offerings', {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Accept': 'application/json',
-      },
-    });
-    if (!response.ok) {
-      const errorText = await response.text();
-      return res.status(response.status).json({ error: 'RevenueCat API error', details: errorText });
-    }
-    const data = await response.json();
-    res.json({ success: true, offerings: data });
-  } catch (error: unknown) {
-    console.error('Error fetching RevenueCat offerings:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-    res.status(500).json({ error: 'Internal server error', message: errorMessage });
-  }
-});
-
-// NEW API ROUTES FOR ONE-FREE-SCAN FLOW
-
-// GET /api/entitlement - Get entitlement status for device
-app.get('/api/entitlement', async (req, res) => {
-  try {
-    const entitlement = await getEntitlementByDevice((req as any).deviceId);
-    res.json(entitlement);
-  } catch (error: unknown) {
-    console.error('Error getting entitlement:', error);
+  } catch (error) {
+    console.error('Error getting user status:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// POST /api/scan - Perform scan with gating logic
-app.post('/api/scan', upload.single('image'), async (req, res) => {
+// Analyze endpoint with gating
+app.post('/api/analyze', upload.single('image'), async (req: any, res) => {
   try {
-    // Check if device can perform scan
-    const { canScan, reason } = await canPerformScan((req as any).deviceId);
+    const deviceId = req.deviceId;
     
-    if (!canScan) {
-      return res.status(402).json({ 
-        requirePaywall: true, 
-        reason: reason || 'limit_exceeded' 
-      });
-    }
-    
-    // If this is a free scan (not premium), increment usage
-    const entitlement = await getEntitlementByDevice((req as any).deviceId);
-    if (!entitlement.active) {
-      await incrementScanUsage((req as any).deviceId);
-    }
-    
-    // Perform the actual scan
-    await doScan(req, res);
-    
-  } catch (error: unknown) {
-    console.error('Error in scan endpoint:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// POST /api/analyze - Direct implementation with structured response
-app.post('/api/analyze', upload.single('image'), async (req, res) => {
-  try {
-    console.log("🔍 /api/analyze endpoint called");
-    console.log("📊 Request details:", {
-      hasFile: !!req.file,
-      fileSize: req.file?.size,
-      deviceId: (req as any).deviceId,
-      contentType: req.headers['content-type'],
-      bodyKeys: Object.keys(req.body || {}),
-      files: Object.keys(req.files || {})
-    });
-    
-    const { canScan, reason } = await canPerformScan((req as any).deviceId);
-    if (!canScan) {
-      console.log("❌ Scan not allowed:", reason);
-      return res.status(402).json({ 
-        requirePaywall: true, 
-        reason: reason || 'limit_exceeded' 
-      });
-    }
-    
-    const entitlement = await getEntitlementByDevice((req as any).deviceId);
-    if (!entitlement.active) {
-      await incrementScanUsage((req as any).deviceId);
-    }
-    
-    // Direct implementation instead of calling doScan
-    if (!req.file) {
-      console.log("❌ No file received in /api/analyze");
-      console.log("📊 Debug info:", {
-        contentType: req.headers['content-type'],
-        body: req.body,
-        files: req.files
-      });
-      return res.status(400).json({ 
-        success: false,
-        error: {
-          code: 'NO_IMAGE',
-          message: 'No image provided'
+    // Check if device can scan
+    const device = await prisma.device.findUnique({
+      where: { id: deviceId },
+      include: {
+        subscriptions: {
+          where: {
+            status: 'active',
+            currentPeriodEnd: { gt: new Date() }
+          }
         }
+      }
+    });
+
+    if (!device) {
+      return res.status(404).json({ error: 'Device not found' });
+    }
+
+    const isPremium = device.subscriptions.length > 0;
+    const scansUsed = device.scansUsed || 0;
+    const scansLimit = isPremium ? -1 : 1;
+
+    // Check gating
+    if (!isPremium && scansUsed >= scansLimit) {
+      return res.status(403).json({
+        error: 'LIMIT_REACHED',
+        message: 'Free scan limit reached. Please upgrade to Premium.',
+        scansUsed,
+        scansLimit
       });
     }
 
-    console.log("✅ Prompt sent to OpenAI from /api/analyze");
+    // Get image
+    const file = req.file;
+    const base64Image = req.body.image;
 
-    // Convertir buffer a base64
-    const base64Image = req.file.buffer.toString('base64');
-    const dataUrl = `data:${req.file.mimetype};base64,${base64Image}`;
+    if (!file && !base64Image) {
+      return res.status(400).json({
+        error: 'NO_IMAGE',
+        message: 'No image provided'
+      });
+    }
 
-    // Prompt estructurado para GPT-4 Vision
-    const prompt = `You are an Expert Fitness Trainer. Analyze the gym equipment in the provided image and respond in the following Markdown format:\n\n## Machine Identification\n- Name: [Equipment Name]\n\n## Muscles Targeted\n- Primary: [Main muscles]\n- Secondary: [Other muscles]\n\n## Step-by-Step Instructions\n1. [Step 1]\n2. [Step 2]\n3. [Step 3]\n...\n\n## Common Mistakes\n- [Mistake 1]\n- [Mistake 2]\n- [Mistake 3]\n\n## Safety Tips\n- [Tip 1]\n- [Tip 2]\n\nBe concise, clear, and ensure each section is filled. If unsure, state "Not clearly visible" in the relevant section.`;
+    // Convert to base64 if needed
+    let imageBase64: string;
+    if (file) {
+      imageBase64 = file.buffer.toString('base64');
+    } else {
+      imageBase64 = base64Image;
+    }
 
-    // Llamada a OpenAI Vision
+    const dataUrl = `data:image/jpeg;base64,${imageBase64}`;
+
+    // Call OpenAI
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o',
       messages: [
         {
           role: 'system',
-          content: prompt
+          content: 'You are an expert fitness trainer. Analyze gym equipment and provide clear, actionable guidance.'
         },
         {
           role: 'user',
           content: [
-            { type: 'text', text: prompt },
-            { type: 'image_url', image_url: { url: dataUrl } }
+            {
+              type: 'text',
+              text: 'What gym equipment is shown in this image? Provide a brief, clear explanation of how to use it properly. Keep the response concise and focused on proper form and usage.'
+            },
+            {
+              type: 'image_url',
+              image_url: { url: dataUrl }
+            }
           ]
         }
       ],
-      max_tokens: 1024
+      max_tokens: 300
     });
 
-    const aiMessage = completion.choices?.[0]?.message?.content || null;
-    if (!aiMessage) {
+    const explanation = completion.choices[0]?.message?.content;
+    if (!explanation) {
       throw new Error('No response from OpenAI');
     }
 
-    // Parse AI response to structured format
-    const parseAIResponse = (aiMessage: string) => {
-      const lines = aiMessage.split('\n');
-      const machine = { id: 'unknown', name: 'Unknown Equipment', confidence: 0.8 };
-      const instructions: string[] = [];
-      const mistakes: string[] = [];
-      const recommendations: string[] = [];
-      
-      let currentSection = '';
-      
-      for (const line of lines) {
-        if (line.includes('Machine Identification')) {
-          currentSection = 'machine';
-        } else if (line.includes('Step-by-Step Instructions')) {
-          currentSection = 'instructions';
-        } else if (line.includes('Common Mistakes')) {
-          currentSection = 'mistakes';
-        } else if (line.includes('Safety Tips')) {
-          currentSection = 'recommendations';
-        } else if (line.startsWith('-') && currentSection) {
-          const content = line.replace(/^-\s*/, '').trim();
-          if (currentSection === 'machine' && line.includes('Name:')) {
-            machine.name = content.replace('Name: ', '');
-          } else if (currentSection === 'instructions') {
-            instructions.push(content);
-          } else if (currentSection === 'mistakes') {
-            mistakes.push(content);
-          } else if (currentSection === 'recommendations') {
-            recommendations.push(content);
-          }
-        }
-      }
-      return { machine, instructions, mistakes, recommendations };
-    };
+    // Increment scan count for non-premium users
+    if (!isPremium) {
+      await prisma.device.update({
+        where: { id: deviceId },
+        data: { scansUsed: { increment: 1 } }
+      });
+    }
 
-    const parsedResponse = parseAIResponse(aiMessage);
-    console.log("✅ Structured response generated:", parsedResponse.machine.name);
-    
     res.json({
       success: true,
-      machine: parsedResponse.machine,
-      instructions: parsedResponse.instructions,
-      mistakes: parsedResponse.mistakes,
-      recommendations: parsedResponse.recommendations,
-      previewUrl: null
+      explanation,
+      isPremium,
+      scansUsed: isPremium ? -1 : scansUsed + 1,
+      scansLimit
     });
-  } catch (error: unknown) {
+
+  } catch (error) {
     console.error('Error in analyze endpoint:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: { 
-        code: 'INTERNAL_ERROR', 
-        message: 'Internal server error' 
-      } 
+    res.status(500).json({
+      error: 'INTERNAL_ERROR',
+      message: 'Failed to analyze image'
     });
   }
 });
 
-// POST /api/checkout - Create Stripe checkout session (CONSOLIDATED)
-app.post('/api/checkout', async (req, res) => {
+// Stripe checkout endpoint
+app.post('/api/stripe/checkout', async (req: any, res) => {
   try {
-    // Validate request body
     const schema = z.object({
       plan: z.enum(['monthly', 'annual'])
     });
     
     const { plan } = schema.parse(req.body);
+    const deviceId = req.deviceId;
     
-    // Get price ID from standardized environment variables
     const priceId = plan === 'annual' 
       ? process.env.STRIPE_PRICE_ID_ANNUAL 
       : process.env.STRIPE_PRICE_ID_MONTHLY;
     
     if (!priceId) {
-      return res.status(400).json({ 
-        error: 'Price ID not configured for plan',
-        plan,
-        expectedEnv: plan === 'annual' ? 'STRIPE_PRICE_ID_ANNUAL' : 'STRIPE_PRICE_ID_MONTHLY'
+      return res.status(400).json({
+        error: 'Price ID not configured',
+        plan
       });
     }
     
-    // Create Stripe checkout session
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
       line_items: [{ price: priceId, quantity: 1 }],
-      client_reference_id: (req as any).deviceId,
-      success_url: `${process.env.WEB_URL}/thank-you?session_id={CHECKOUT_SESSION_ID}`,
+      client_reference_id: deviceId,
+      success_url: `${process.env.WEB_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${process.env.WEB_URL}/pricing?canceled=1`,
       allow_promotion_codes: true,
       metadata: {
-        deviceId: (req as any).deviceId,
-        plan: plan
+        deviceId,
+        plan
       }
     });
     
-    console.log(`✅ Created checkout session ${session.id} for device ${(req as any).deviceId}, plan: ${plan}`);
     res.json({ url: session.url });
     
-  } catch (error: unknown) {
+  } catch (error) {
     console.error('Error creating checkout session:', error);
-    
-    if (error instanceof z.ZodError) {
-      return res.status(400).json({ 
-        error: 'Invalid request body', 
-        details: (error as any).issues 
-      });
-    }
-    
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-    return res.status(500).json({ 
-      error: 'Internal server error', 
-      message: errorMessage 
+    res.status(500).json({
+      error: 'Failed to create checkout session'
     });
   }
 });
 
-// Refactored scan logic
-async function doScan(req, res) {
+// Stripe webhook
+app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  
   try {
-    if (!req.file) {
-      return res.status(400).json({ 
-        success: false,
-        error: {
-          code: 'NO_IMAGE',
-          message: 'No image provided'
-        }
-      });
+    if (!sig) {
+      return res.status(400).send('Missing signature');
     }
-
-    // Log para verificar ejecución real de AI
-    console.log("✅ Prompt sent to OpenAI from /api/scan");
-
-    // Convertir buffer a base64
-    const base64Image = req.file.buffer.toString('base64');
-    const dataUrl = `data:${req.file.mimetype};base64,${base64Image}`;
-
-    // Prompt estructurado para GPT-4 Vision
-    const prompt = `You are an Expert Fitness Trainer. Analyze the gym equipment in the provided image and respond in the following Markdown format:\n\n## Machine Identification\n- Name: [Equipment Name]\n\n## Muscles Targeted\n- Primary: [Main muscles]\n- Secondary: [Other muscles]\n\n## Step-by-Step Instructions\n1. [Step 1]\n2. [Step 2]\n3. [Step 3]\n...\n\n## Common Mistakes\n- [Mistake 1]\n- [Mistake 2]\n- [Mistake 3]\n\n## Safety Tips\n- [Tip 1]\n- [Tip 2]\n\nBe concise, clear, and ensure each section is filled. If unsure, state "Not clearly visible" in the relevant section.`;
-
-    // Llamada a OpenAI Vision
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o',
-      messages: [
-        {
-          role: 'system',
-          content: prompt
-        },
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: prompt },
-            { type: 'image_url', image_url: { url: dataUrl } }
-          ]
+    
+    const event = stripe.webhooks.constructEvent(
+      req.body,
+      sig,
+      process.env.STRIPE_WEBHOOK_SECRET!
+    );
+    
+    // Handle the event
+    switch (event.type) {
+      case 'checkout.session.completed': {
+        const session = event.data.object;
+        const deviceId = session.client_reference_id;
+        
+        if (deviceId && session.mode === 'subscription' && session.subscription) {
+          // Create subscription record
+          await prisma.subscription.create({
+            data: {
+              provider: 'stripe',
+              providerCustomerId: session.customer as string,
+              providerSubscriptionId: session.subscription as string,
+              status: 'active',
+              plan: session.metadata?.plan || 'monthly',
+              deviceId,
+              currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) // 30 days from now
+            }
+          });
+          
+          console.log(`✅ Created subscription for device ${deviceId}`);
         }
-      ],
-      max_tokens: 1024
-    });
-
-    const aiMessage = completion.choices?.[0]?.message?.content || null;
-    if (!aiMessage) {
-      throw new Error('No response from OpenAI');
-    }
-
-    // Parse AI response to structured format
-    const parseAIResponse = (aiMessage: string) => {
-      const lines = aiMessage.split('\n');
-      const machine = { id: 'unknown', name: 'Unknown Equipment', confidence: 0.8 };
-      const instructions: string[] = [];
-      const mistakes: string[] = [];
-      const recommendations: string[] = [];
-      
-      let currentSection = '';
-      
-      for (const line of lines) {
-        if (line.includes('Machine Identification')) {
-          currentSection = 'machine';
-        } else if (line.includes('Step-by-Step Instructions')) {
-          currentSection = 'instructions';
-        } else if (line.includes('Common Mistakes')) {
-          currentSection = 'mistakes';
-        } else if (line.includes('Safety Tips')) {
-          currentSection = 'recommendations';
-        } else if (line.startsWith('-') && currentSection) {
-          const content = line.replace(/^-\s*/, '').trim();
-          if (currentSection === 'machine' && line.includes('Name:')) {
-            machine.name = content.replace('Name: ', '');
-          } else if (currentSection === 'instructions') {
-            instructions.push(content);
-          } else if (currentSection === 'mistakes') {
-            mistakes.push(content);
-          } else if (currentSection === 'recommendations') {
-            recommendations.push(content);
-          }
-        }
+        break;
       }
-      return { machine, instructions, mistakes, recommendations };
-    };
-
-    const parsedResponse = parseAIResponse(aiMessage);
-    res.json({
-      success: true,
-      machine: parsedResponse.machine,
-      instructions: parsedResponse.instructions,
-      mistakes: parsedResponse.mistakes,
-      recommendations: parsedResponse.recommendations,
-      previewUrl: null
-    });
-  } catch (error: unknown) {
-    console.error('Error analyzing equipment:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-    res.status(500).json({
-      error: 'Internal server error',
-      message: errorMessage || 'Failed to analyze the image'
-    });
+      
+      case 'customer.subscription.updated': {
+        const subscription = event.data.object;
+        
+        await prisma.subscription.updateMany({
+          where: { providerSubscriptionId: subscription.id },
+          data: {
+            status: subscription.status,
+            currentPeriodEnd: subscription.current_period_end 
+              ? new Date(subscription.current_period_end * 1000) 
+              : null
+          }
+        });
+        break;
+      }
+      
+      case 'customer.subscription.deleted': {
+        const subscription = event.data.object;
+        
+        await prisma.subscription.updateMany({
+          where: { providerSubscriptionId: subscription.id },
+          data: { status: 'canceled' }
+        });
+        break;
+      }
+    }
+    
+    res.status(200).send('ok');
+    
+  } catch (error) {
+    console.error('Webhook error:', error);
+    res.status(400).send('Webhook error');
   }
-}
-
+});
 
 // Error handling middleware
-app.use((error, req, res, next) => {
+app.use((error: any, req: any, res: any, next: any) => {
   console.error('Error:', error);
   
   if (error instanceof multer.MulterError) {
@@ -1031,36 +425,9 @@ app.use('*', (req, res) => {
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📍 Health check: http://localhost:${PORT}/health`);
-  console.log(`🔍 Scan endpoint: http://localhost:${PORT}/api/scan`);
-  console.log(`💳 Checkout endpoint: http://localhost:${PORT}/api/checkout`);
-  
-  // Log configuration status
-  console.log(`🌐 WEB_URL: ${process.env.WEB_URL || 'NOT_SET'}`);
-  console.log(`🔒 CORS_ALLOWED_ORIGINS: ${process.env.CORS_ALLOWED_ORIGINS || 'NOT_SET'}`);
-  console.log(`🔒 CORS: Production + Vercel previews + localhost allowed`);
-  
-  // Log CORS and NODE_ENV configuration
-  console.log('[server] NODE_ENV:', process.env.NODE_ENV);
-  
-  console.log(`💳 Stripe config → PRICE_MONTHLY: ${process.env.STRIPE_PRICE_ID_MONTHLY ? '✔' : '✖'}, PRICE_ANNUAL: ${process.env.STRIPE_PRICE_ID_ANNUAL ? '✔' : '✖'}, WEBHOOK_SECRET: ${!!process.env.STRIPE_WEBHOOK_SECRET ? '✔' : '✖'}`);
-  
-  // STRIPE: Log Stripe configuration status
-  console.log("💳 Stripe config →",
-    "SECRET:", !!process.env.STRIPE_SECRET_KEY,
-    "WEBHOOK:", !!process.env.STRIPE_WEBHOOK_SECRET,
-    "MONTHLY:", !!process.env.STRIPE_PRICE_ID_MONTHLY,
-    "ANNUAL:", !!process.env.STRIPE_PRICE_ID_ANNUAL
-  );
-  
-  // Checkout endpoint status
-  console.log('[checkout] ready', {
-    WEB_URL: process.env.WEB_URL,
-    MONTHLY: !!process.env.STRIPE_PRICE_ID_MONTHLY,
-    ANNUAL: !!process.env.STRIPE_PRICE_ID_ANNUAL,
-  });
-  
-  // Log mounted endpoints
-  console.log("✅ Mounted endpoints: /api/checkout, /api/stripe/products, /api/stripe/diagnostics");
+  console.log(`🔍 Analyze endpoint: http://localhost:${PORT}/api/analyze`);
+  console.log(`💳 Stripe checkout: http://localhost:${PORT}/api/stripe/checkout`);
+  console.log(`🔗 Webhook: http://localhost:${PORT}/api/stripe/webhook`);
 });
 
-module.exports = app; 
+export default app;

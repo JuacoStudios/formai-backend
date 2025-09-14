@@ -1,31 +1,30 @@
 {
-  "name": "backend",
+  "name": "formai-backend",
   "version": "1.0.0",
-  "description": "Backend API for gym equipment analysis with Lemon Squeezy integration",
+  "description": "Backend API for FormAI gym equipment analysis",
   "main": "dist/server.js",
   "scripts": {
     "build": "rimraf dist && tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "dev": "tsx src/server.ts",
-    "test": "echo \"Error: no test specified\" && exit 1",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",
-    "prisma:migrate:deploy": "prisma migrate deploy",
-    "prisma:push": "prisma db push"
+    "prisma:push": "prisma db push",
+    "prisma:studio": "prisma studio"
   },
   "keywords": [
     "gym",
     "equipment",
     "analysis",
     "api",
-    "lemonsqueezy",
-    "subscriptions"
+    "stripe",
+    "subscriptions",
+    "openai"
   ],
   "author": "",
   "license": "ISC",
-  "type": "commonjs",
+  "type": "module",
   "dependencies": {
-    "@clerk/nextjs": "^6.31.8",
     "@prisma/client": "^5.17.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
@@ -33,7 +32,6 @@
     "express": "^4.18.2",
     "multer": "^1.4.5-lts.1",
     "openai": "^5.8.2",
-    "prisma": "^5.17.0",
     "stripe": "^18.4.0",
     "uuid": "^11.1.0",
     "zod": "^3.23.0"
@@ -42,7 +40,11 @@
     "@types/express": "^5.0.3",
     "@types/multer": "^2.0.0",
     "@types/node": "^22.18.1",
+    "@types/cookie-parser": "^1.4.7",
+    "@types/cors": "^2.8.17",
+    "@types/uuid": "^10.0.0",
     "nodemon": "^3.0.2",
+    "prisma": "^5.17.0",
     "rimraf": "^5.0.5",
     "tsx": "^4.7.0",
     "typescript": "^5.9.2"

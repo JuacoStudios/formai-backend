@@ -14,22 +14,21 @@ model Device {
   id            String         @id @default(uuid())
   createdAt     DateTime       @default(now())
   lastSeen      DateTime       @default(now())
+  scansUsed     Int            @default(0)
   // inverse relations
   subscriptions Subscription[]
-  usageCounters UsageCounter[]
 }
 
 model Subscription {
   id       String  @id @default(uuid())
-  // optional link to a device; we also store plain ids to be flexible
-  deviceId String?
-  device   Device? @relation(fields: [deviceId], references: [id])
+  deviceId String
+  device   Device  @relation(fields: [deviceId], references: [id], onDelete: Cascade)
 
   provider               String // 'stripe' | 'lemonsqueezy'
   providerCustomerId     String?
   providerSubscriptionId String    @unique
-  status                 String
-  plan                   String? // 'monthly' | 'annual'
+  status                 String    // 'active' | 'canceled' | 'past_due'
+  plan                   String?   // 'monthly' | 'annual'
   currentPeriodEnd       DateTime?
   cancelAtPeriodEnd      DateTime?
 
@@ -37,31 +36,11 @@ model Subscription {
   updatedAt DateTime @updatedAt
 }
 
-model UsageCounter {
-  
-  id          String    @id @default(uuid())
-  deviceId    String    @unique
-  device      Device    @relation(fields: [deviceId], references: [id])
-  scansUsed   Int       @default(0)
-  lastResetAt DateTime?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-}
-
 model WebhookEvent {
   id          String    @id // event_id from Stripe
   provider    String
+  type        String
   payload     Json
   createdAt   DateTime  @default(now())
   processedAt DateTime?
-}
-
-model DeviceMap {
-  // allows binding Stripe customer/subscription back to a device
-  id                   String   @id @default(uuid())
-  deviceId             String
-  stripeCustomerId     String?  @unique
-  stripeSubscriptionId String?  @unique
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
 }

@@ -4,9 +4,10 @@
   "description": "Backend API for FormAI gym equipment analysis",
   "main": "dist/server.js",
   "scripts": {
-    "build": "rimraf dist && tsc -p tsconfig.json",
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
     "start": "node dist/server.js",
-    "dev": "tsx src/server.ts",
+    "postinstall": "prisma generate",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",
     "prisma:push": "prisma db push",
@@ -24,6 +25,10 @@
   "author": "",
   "license": "ISC",
   "type": "module",
+  "engines": {
+    "node": ">=20.10 <21",
+    "npm": ">=10"
+  },
   "dependencies": {
     "@prisma/client": "^5.17.0",
     "cookie-parser": "^1.4.7",
@@ -48,8 +53,5 @@
     "rimraf": "^5.0.5",
     "tsx": "^4.7.0",
     "typescript": "^5.9.2"
-  },
-  "engines": {
-    "node": ">=18.0.0"
   }
 }

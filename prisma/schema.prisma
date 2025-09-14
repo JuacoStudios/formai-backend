@@ -14,7 +14,7 @@ model Device {
   id            String         @id @default(uuid())
   createdAt     DateTime       @default(now())
   lastSeen      DateTime       @default(now())
-  scansUsed     Int            @default(0)      // authoritative counter
+git   scansUsed     Int            @default(0)      // authoritative counter
   subscriptions Subscription[]
 }
 

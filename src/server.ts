@@ -15,7 +15,7 @@ const prisma = new PrismaClient();
 
 // Initialize Stripe
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
-  apiVersion: '2024-06-20'
+  apiVersion: '2025-08-27.basil'
 });
 
 // Initialize OpenAI
@@ -37,7 +37,7 @@ const corsOptions: cors.CorsOptions = {
     
     if (!origin || allowedOrigins.some(regex => regex.test(origin))) {
       callback(null, true);
-    } else {
+        } else {
       callback(new Error('Not allowed by CORS'));
     }
   },
@@ -61,7 +61,7 @@ const upload = multer({
     if (file.mimetype.startsWith('image/')) {
       cb(null, true);
     } else {
-      cb(new Error('Only image files are allowed'), false);
+      cb(null, false);
     }
   }
 });
@@ -81,7 +81,7 @@ async function ensureDeviceId(req: any, res: any, next: any) {
       maxAge: 365 * 24 * 60 * 60 * 1000, // 1 year
     });
   }
-
+  
   // Upsert device in database
   try {
     await prisma.device.upsert({
@@ -92,7 +92,7 @@ async function ensureDeviceId(req: any, res: any, next: any) {
   } catch (error) {
     console.error('Error upserting device:', error);
   }
-
+  
   req.deviceId = deviceId;
   next();
 }
@@ -147,7 +147,7 @@ app.get('/api/me', async (req: any, res) => {
     const isPremium = device.subscriptions.length > 0;
     const subscription = device.subscriptions[0];
 
-    res.json({
+    return res.json({
       userId: deviceId,
       isPremium,
       subscription: subscription ? {
@@ -160,7 +160,7 @@ app.get('/api/me', async (req: any, res) => {
     });
   } catch (error) {
     console.error('Error getting user status:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -258,8 +258,8 @@ app.post('/api/analyze', upload.single('image'), async (req: any, res) => {
         data: { scansUsed: { increment: 1 } }
       });
     }
-
-    res.json({
+    
+    return res.json({
       success: true,
       explanation,
       isPremium,
@@ -269,7 +269,7 @@ app.post('/api/analyze', upload.single('image'), async (req: any, res) => {
 
   } catch (error) {
     console.error('Error in analyze endpoint:', error);
-    res.status(500).json({
+    return res.status(500).json({
       error: 'INTERNAL_ERROR',
       message: 'Failed to analyze image'
     });
@@ -291,7 +291,7 @@ app.post('/api/stripe/checkout', async (req: any, res) => {
       : process.env.STRIPE_PRICE_ID_MONTHLY;
     
     if (!priceId) {
-      return res.status(400).json({
+      return res.status(400).json({ 
         error: 'Price ID not configured',
         plan
       });
@@ -310,11 +310,11 @@ app.post('/api/stripe/checkout', async (req: any, res) => {
       }
     });
     
-    res.json({ url: session.url });
+    return res.json({ url: session.url });
     
   } catch (error) {
     console.error('Error creating checkout session:', error);
-    res.status(500).json({
+    return res.status(500).json({
       error: 'Failed to create checkout session'
     });
   }
@@ -367,8 +367,8 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
           where: { providerSubscriptionId: subscription.id },
           data: {
             status: subscription.status,
-            currentPeriodEnd: subscription.current_period_end 
-              ? new Date(subscription.current_period_end * 1000) 
+            currentPeriodEnd: (subscription as any).current_period_end 
+              ? new Date((subscription as any).current_period_end * 1000) 
               : null
           }
         });
@@ -386,11 +386,11 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
       }
     }
     
-    res.status(200).send('ok');
+    return res.status(200).send('ok');
     
   } catch (error) {
     console.error('Webhook error:', error);
-    res.status(400).send('Webhook error');
+    return res.status(400).send('Webhook error');
   }
 });
 

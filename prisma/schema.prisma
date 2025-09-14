@@ -14,33 +14,28 @@ model Device {
   id            String         @id @default(uuid())
   createdAt     DateTime       @default(now())
   lastSeen      DateTime       @default(now())
-  scansUsed     Int            @default(0)
-  // inverse relations
+  scansUsed     Int            @default(0)      // authoritative counter
   subscriptions Subscription[]
 }
 
 model Subscription {
-  id       String  @id @default(uuid())
-  deviceId String
-  device   Device  @relation(fields: [deviceId], references: [id], onDelete: Cascade)
-
-  provider               String // 'stripe' | 'lemonsqueezy'
+  id                     String   @id @default(uuid())
+  deviceId               String
+  device                 Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  provider               String
   providerCustomerId     String?
-  providerSubscriptionId String    @unique
-  status                 String    // 'active' | 'canceled' | 'past_due'
-  plan                   String?   // 'monthly' | 'annual'
+  providerSubscriptionId String   @unique
+  status                 String
+  plan                   String?
   currentPeriodEnd       DateTime?
-  cancelAtPeriodEnd      DateTime?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  canceledAtPeriodEnd    DateTime?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
 }
 
 model WebhookEvent {
-  id          String    @id // event_id from Stripe
-  provider    String
-  type        String
-  payload     Json
-  createdAt   DateTime  @default(now())
-  processedAt DateTime?
+  id        String   @id @default(uuid())
+  type      String                      // <— ensure present
+  payload   Json
+  createdAt DateTime @default(now())
 }

@@ -9,6 +9,15 @@ import { OpenAI } from 'openai';
 import Stripe from 'stripe';
 import { PrismaClient } from '@prisma/client';
 
+// Validate required environment variables
+const required = ['DATABASE_URL', 'OPENAI_API_KEY', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET'];
+for (const k of required) {
+  if (!process.env[k]) {
+    console.error(`[config] Missing env: ${k}`);
+    process.exit(1);
+  }
+}
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 const prisma = new PrismaClient();
@@ -338,20 +347,28 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
     // Handle the event
     switch (event.type) {
       case 'checkout.session.completed': {
-        const session = event.data.object;
+        const session = event.data.object as Stripe.Checkout.Session;
         const deviceId = session.client_reference_id;
         
         if (deviceId && session.mode === 'subscription' && session.subscription) {
-          // Create subscription record
-          await prisma.subscription.create({
-            data: {
-              provider: 'stripe',
-              providerCustomerId: session.customer as string,
-              providerSubscriptionId: session.subscription as string,
-              status: 'active',
-              plan: session.metadata?.plan || 'monthly',
+          const subId = session.subscription as string;
+          const sub = await stripe.subscriptions.retrieve(subId);
+          
+          await prisma.subscription.upsert({
+            where: { providerSubscriptionId: sub.id },
+            update: {
+              status: sub.status,
+              currentPeriodEnd: new Date(sub.current_period_end * 1000),
+              plan: sub.items.data[0]?.price?.recurring?.interval === 'year' ? 'annual' : 'monthly'
+            },
+            create: {
               deviceId,
-              currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) // 30 days from now
+              provider: 'stripe',
+              providerCustomerId: String(session.customer),
+              providerSubscriptionId: sub.id,
+              status: sub.status,
+              currentPeriodEnd: new Date(sub.current_period_end * 1000),
+              plan: sub.items.data[0]?.price?.recurring?.interval === 'year' ? 'annual' : 'monthly'
             }
           });
           
@@ -361,27 +378,29 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
       }
       
       case 'customer.subscription.updated': {
-        const subscription = event.data.object;
+        const subscription = event.data.object as Stripe.Subscription;
         
         await prisma.subscription.updateMany({
           where: { providerSubscriptionId: subscription.id },
           data: {
             status: subscription.status,
-            currentPeriodEnd: (subscription as any).current_period_end 
-              ? new Date((subscription as any).current_period_end * 1000) 
-              : null
+            currentPeriodEnd: new Date(subscription.current_period_end * 1000)
           }
         });
+        
+        console.log(`✅ Updated subscription ${subscription.id}`);
         break;
       }
       
       case 'customer.subscription.deleted': {
-        const subscription = event.data.object;
+        const subscription = event.data.object as Stripe.Subscription;
         
         await prisma.subscription.updateMany({
           where: { providerSubscriptionId: subscription.id },
           data: { status: 'canceled' }
         });
+        
+        console.log(`✅ Canceled subscription ${subscription.id}`);
         break;
       }
     }

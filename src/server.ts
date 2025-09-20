@@ -358,7 +358,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
             where: { providerSubscriptionId: sub.id },
             update: {
               status: sub.status,
-              currentPeriodEnd: new Date(sub.current_period_end * 1000),
+              currentPeriodEnd: new Date((sub as any).current_period_end * 1000),
               plan: sub.items.data[0]?.price?.recurring?.interval === 'year' ? 'annual' : 'monthly'
             },
             create: {
@@ -367,7 +367,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
               providerCustomerId: String(session.customer),
               providerSubscriptionId: sub.id,
               status: sub.status,
-              currentPeriodEnd: new Date(sub.current_period_end * 1000),
+              currentPeriodEnd: new Date((sub as any).current_period_end * 1000),
               plan: sub.items.data[0]?.price?.recurring?.interval === 'year' ? 'annual' : 'monthly'
             }
           });
@@ -384,7 +384,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
           where: { providerSubscriptionId: subscription.id },
           data: {
             status: subscription.status,
-            currentPeriodEnd: new Date(subscription.current_period_end * 1000)
+            currentPeriodEnd: new Date((subscription as any).current_period_end * 1000)
           }
         });
         

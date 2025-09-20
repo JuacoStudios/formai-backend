@@ -65,3 +65,5 @@ ALTER TABLE "Subscription" ADD CONSTRAINT "Subscription_deviceId_fkey" FOREIGN K
 ALTER TABLE "UsageCounter" ADD CONSTRAINT "UsageCounter_deviceId_fkey" FOREIGN KEY ("deviceId") REFERENCES "Device"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 
+
+
